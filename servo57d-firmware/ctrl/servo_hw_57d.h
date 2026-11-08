@@ -2,6 +2,7 @@
 #ifndef SERVO_HW_57D_H
 #define SERVO_HW_57D_H
 #define SV_BOARD_NAME     "SERVO57D"
+#define SV_BOARD_ID       57
 #define SV_SHUNT_OHM      0.02f     /* R10, R22 */
 /* Coil A is sensed in leg A+, coil B in leg B-. With i_A flowing A+ -> A- and i_B
  * flowing B+ -> B-, the shunt carries -i_A and +i_B toward ground; the ADC rises

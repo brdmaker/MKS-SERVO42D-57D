@@ -4,6 +4,7 @@
 #ifndef SERVO_HW_42D_H
 #define SERVO_HW_42D_H
 #define SV_BOARD_NAME     "SERVO42D"
+#define SV_BOARD_ID       42
 #define SV_SHUNT_OHM      0.05f     /* R9, R18 */
 #define SV_SENSE_SIGN_A   (-1.0f)   /* shunt in leg A+, as on the 57D (verify) */
 #define SV_SENSE_SIGN_B   (+1.0f)   /* shunt in leg B-, as on the 57D (verify) */

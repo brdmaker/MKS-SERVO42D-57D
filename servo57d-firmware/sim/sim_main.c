@@ -3,6 +3,7 @@
 #include "sim_plant.h"
 #include "sim_board.h"
 #include "../ctrl/mt6816_proto.h"
+#include "../ctrl/params.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -359,6 +360,225 @@ static void test_param_mismatch(void)
     }
 }
 
+
+/* ---- parameter access over the CAN mailbox ---- */
+static float f32of(uint32_t raw) { float f; memcpy(&f, &raw, 4); return f; }
+static uint32_t bitsof(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+
+/* send a parameter command, run 2.5 ms, return the 0x381 reply for `code` and `id` */
+static bool pxfer(sim_t *s, const uint8_t *cmd, int len, can_frame_t *rep)
+{
+    can_frame_t f; memset(&f, 0, sizeof f);
+    f.id = 0x100 + s->can.node; f.len = len; memcpy(f.data, cmd, len);
+    sim_can_send(s, &f);
+    sim_run(s, 0.0025);
+    can_frame_t r; bool got = false;
+    while (sim_can_recv(s, &r))
+        if (r.id == 0x380 + s->can.node && r.data[0] == cmd[0]) { *rep = r; got = true; }
+    return got;
+}
+static int pget(sim_t *s, uint16_t id, uint32_t *val)
+{
+    uint8_t c[3] = { 0x31, (uint8_t)id, (uint8_t)(id >> 8) }; can_frame_t r;
+    if (!pxfer(s, c, 3, &r)) return -1;
+    *val = (uint32_t)r.data[4] | (uint32_t)r.data[5] << 8 | (uint32_t)r.data[6] << 16 | (uint32_t)r.data[7] << 24;
+    return r.data[1] & 15;
+}
+static int pset(sim_t *s, uint16_t id, uint32_t raw, uint32_t *val)
+{
+    uint8_t c[7] = { 0x30, (uint8_t)id, (uint8_t)(id >> 8), (uint8_t)raw, (uint8_t)(raw >> 8), (uint8_t)(raw >> 16), (uint8_t)(raw >> 24) };
+    can_frame_t r;
+    if (!pxfer(s, c, 7, &r)) return -1;
+    if (val) *val = (uint32_t)r.data[4] | (uint32_t)r.data[5] << 8 | (uint32_t)r.data[6] << 16 | (uint32_t)r.data[7] << 24;
+    return r.data[1] & 15;
+}
+static int pinfo(sim_t *s, uint16_t id, int sel, uint32_t *val)
+{
+    uint8_t c[4] = { 0x32, (uint8_t)id, (uint8_t)(id >> 8), (uint8_t)sel }; can_frame_t r;
+    if (!pxfer(s, c, 4, &r)) return -1;
+    *val = (uint32_t)r.data[4] | (uint32_t)r.data[5] << 8 | (uint32_t)r.data[6] << 16 | (uint32_t)r.data[7] << 24;
+    return r.data[1] & 15;
+}
+static int pat(sim_t *s, uint16_t index, uint32_t *val)
+{
+    uint8_t c[3] = { 0x33, (uint8_t)index, (uint8_t)(index >> 8) }; can_frame_t r;
+    if (!pxfer(s, c, 3, &r)) return -1;
+    *val = (uint32_t)r.data[4] | (uint32_t)r.data[5] << 8;
+    return r.data[1] & 15;
+}
+static uint8_t flash_blob[256]; static int flash_len;
+static int flash_cb(const uint8_t *b, uint16_t n) { memcpy(flash_blob, b, n); flash_len = n; return 0; }
+
+static void test_params(void)
+{
+    printf("[parameters over CAN]\n");
+    fresh();
+    uint32_t v = 0; int st;
+    /* enumeration */
+    st = pat(&S, 0xFFFF, &v);
+    int count = (int)v;
+    CHECK(st == 0 && count == params_count(), "count %d, table %d", count, params_count());
+    int rw = 0, saved = 0;
+    for (int i = 0; i < count; i++) {
+        uint32_t idv = 0; st = pat(&S, (uint16_t)i, &idv);
+        const param_def_t *d = params_at(i);
+        CHECK(st == 0 && d && idv == d->id, "index %d -> id 0x%04x (table 0x%04x)", i, idv, d ? d->id : 0);
+        if (!d) continue;
+        if (!(d->flags & PF_RO)) rw++;
+        if (d->flags & PF_PERSIST) saved++;
+        uint32_t t, mn, mx, got;
+        CHECK(pinfo(&S, d->id, 0, &t) == 0 && (t & 0xFF) == (uint32_t)d->type && (t >> 8) == d->flags, "info type/flags of %s", d->name);
+        CHECK(pinfo(&S, d->id, 1, &mn) == 0 && f32of(mn) == d->min, "min of %s", d->name);
+        CHECK(pinfo(&S, d->id, 2, &mx) == 0 && f32of(mx) == d->max, "max of %s", d->name);
+        CHECK(pget(&S, d->id, &got) == 0, "get %s", d->name);
+        if (!(d->flags & PF_RO)) {                                 /* writable: range edges and round trip */
+            uint32_t cur; pget(&S, d->id, &cur);
+            CHECK(pset(&S, d->id, cur, &got) == PS_OK && got == cur, "%s: write back the current value", d->name);
+            if (d->type == PT_F32) {
+                CHECK(pset(&S, d->id, bitsof(d->max * 1.01f + 1e-3f), &got) == PS_RANGE && got == cur, "%s: above the maximum", d->name);
+                CHECK(pset(&S, d->id, bitsof(d->min - fabsf(d->min) * 0.01f - 1e-3f), &got) == PS_RANGE && got == cur, "%s: below the minimum", d->name);
+                float mid = 0.5f * (d->min + d->max);
+                if (d->id == 0x0204) mid = 0.5f * S.servo.cfg.i_max;          /* the runtime limit is capped by i_max */
+                CHECK(pset(&S, d->id, bitsof(mid), &got) == PS_OK && f32of(got) == mid, "%s: midpoint %g read back %g", d->name, mid, f32of(got));
+            } else {
+                CHECK(pset(&S, d->id, (uint32_t)(int32_t)((double)d->max + 1), &got) == PS_RANGE && got == cur, "%s: above the maximum", d->name);
+                CHECK(pset(&S, d->id, (uint32_t)(int32_t)((double)d->min - 1), &got) == PS_RANGE && got == cur, "%s: below the minimum", d->name);
+                int32_t mid = (int32_t)((d->min + d->max) / 2);
+                if (d->id == 0x0400) mid = (int32_t)cur;               /* the node id keeps the mailbox working */
+                CHECK(pset(&S, d->id, (uint32_t)mid, &got) == PS_OK && (int32_t)got == mid, "%s: midpoint %d read back %d", d->name, mid, (int)got);
+            }
+        } else {
+            CHECK(pset(&S, d->id, 1, &got) == PS_READ_ONLY, "%s: read-only write accepted", d->name);
+        }
+    }
+    INFO("%d parameters, %d settable, %d in the saved set", count, rw, saved);
+    /* errors */
+    CHECK(pget(&S, 0x7777, &v) == PS_UNKNOWN, "unknown id on get");
+    CHECK(pset(&S, 0x7777, 0, &v) == PS_UNKNOWN, "unknown id on set");
+    { uint8_t c[3] = { 0x30, 0x07, 0x03 }; can_frame_t r; CHECK(pxfer(&S, c, 3, &r) && (r.data[1] & 15) == PS_BAD_ARG, "short set frame"); }
+    CHECK(pset(&S, 0x0307, bitsof(NAN), &v) == PS_BAD_ARG, "NaN");
+    CHECK(pset(&S, 0x0307, bitsof(INFINITY), &v) == PS_BAD_ARG, "infinity");
+    /* relation between vbus limits */
+    fresh();
+    CHECK(pset(&S, 0x030B, bitsof(35.0f), &v) == PS_RANGE, "vbus_min above vbus_max accepted");
+    CHECK(pset(&S, 0x030C, bitsof(9.0f), &v) == PS_RANGE, "vbus_max below vbus_min accepted");
+    /* identity */
+    CHECK(pget(&S, 0x0001, &v) == 0 && v == SV_FW_VERSION, "fw version");
+    CHECK(pget(&S, 0x0002, &v) == 0 && v == SV_BOARD_ID, "board id");
+}
+
+static void test_params_running(void)
+{
+    printf("[parameters while running]\n");
+    fresh();
+    if (!start_run(&S)) { CHECK(0, "no RUN"); return; }
+    uint32_t v, before; pget(&S, 0x0300, &before);
+    CHECK(pset(&S, 0x0300, bitsof(2.0f), &v) == PS_RUNNING && v == before, "motor_r changed while running");
+    uint32_t pp; pget(&S, 0x0303, &pp);
+    CHECK(pset(&S, 0x0303, 20, &v) == PS_RUNNING && v == pp, "pole_pairs changed while running");
+    CHECK(pset(&S, 0x0307, bitsof(80.0f), &v) == PS_OK && f32of(v) == 80.0f, "pos_kp not writable while running");
+    CHECK(pset(&S, 0x0204, bitsof(1.0f), &v) == PS_OK && fabsf(S.servo.ilim - 1.0f) < 1e-6f, "current limit");
+    CHECK(pset(&S, 0x0304, bitsof(0.5f), &v) == PS_OK && S.servo.ilim <= 0.5f + 1e-6f, "i_max below the limit must pull the limit down");
+    /* the measured values follow the drive */
+    sim_run(&S, 0.1);
+    pget(&S, 0x0100, &v);   CHECK((int)v == SV_RUN, "state parameter %u", v);
+    pget(&S, 0x0103, &v);   CHECK((int32_t)v == S.servo.pos || labs((int32_t)v - S.servo.pos) < 3, "pos parameter");
+    pget(&S, 0x010C, &v);   CHECK(fabsf(f32of(v) - 24.0f) < 0.5f, "vbus parameter %.2f", f32of(v));
+    /* defaults refuse while running */
+    uint8_t c[1] = { 0x36 }; can_frame_t r;
+    sim_can_cmd(&S, 0x36, NULL, 0); (void)c; (void)r;
+    sim_run(&S, 0.003);
+    CHECK(S.servo.cfg.pos_kp == 80.0f, "defaults were applied while running");
+}
+
+static void test_param_effect(void)
+{
+    printf("[a parameter change takes effect]\n");
+    double rise[2];
+    float bw[2] = { 1000.0f, 400.0f };
+    for (int k = 0; k < 2; k++) {
+        fresh();
+        uint32_t v;
+        CHECK(pset(&S, 0x0306, bitsof(bw[k]), &v) == PS_OK, "cur_bw");
+        CHECK(pset(&S, 0x0305, bitsof((float)SIM_I_ALIGN), &v) == PS_OK, "i_align");
+        if (!start_run(&S)) { CHECK(0, "no RUN"); return; }
+        cmd_mode(&S, SV_MODE_TORQUE); sim_run(&S, 0.01);
+        S.m.locked = true; sim_run(&S, 0.02);
+        cmd_torque_ma(&S, (int)(ISTEP * 1000)); sim_run(&S, 0.0005);
+        double t10 = -1, t90 = -1, t = 0;
+        for (int i = 0; i < 500; i++) {
+            sim_run(&S, 40e-6); t += 40e-6;
+            if (t10 < 0 && S.m.iq_true >= 0.1 * ISTEP) t10 = t;
+            if (t90 < 0 && S.m.iq_true >= 0.9 * ISTEP) t90 = t;
+        }
+        rise[k] = (t90 - t10) * 1e6;
+    }
+    INFO("current loop bandwidth 1000 Hz: rise %.0f us; set to 400 Hz over CAN: rise %.0f us", rise[0], rise[1]);
+    CHECK(rise[1] > 2.0 * rise[0] && rise[1] > 600 && rise[1] < 1500, "rise %.0f us at 400 Hz", rise[1]);
+}
+
+static void test_param_store(void)
+{
+    printf("[saving parameters]\n");
+    fresh();
+    uint32_t v;
+    /* no flash behind the command yet */
+    sim_can_cmd(&S, 0x35, NULL, 0);
+    sim_run(&S, 0.003);
+    { can_frame_t r; int got = 0; while (sim_can_recv(&S, &r)) if (r.id == 0x081 && r.data[0] == 0x35) { got = 1; CHECK(r.data[1] == PS_UNAVAIL, "save without a store: status %d", r.data[1]); } CHECK(got, "no reply to save"); }
+    S.can.save_cb = flash_cb; flash_len = 0;
+    pset(&S, 0x0307, bitsof(77.0f), &v); pset(&S, 0x0308, bitsof(0.05f), &v);
+    pset(&S, 0x030F, bitsof(0.03f), &v); pset(&S, 0x0401, 250, &v); pset(&S, 0x0300, bitsof(1.25f), &v);
+    sim_can_cmd(&S, 0x35, NULL, 0); sim_run(&S, 0.003);
+    { can_frame_t r; while (sim_can_recv(&S, &r)) if (r.id == 0x081 && r.data[0] == 0x35) CHECK(r.data[1] == 0, "save status %d", r.data[1]); }
+    CHECK(flash_len > 0 && flash_len <= (int)sizeof flash_blob, "blob length %d", flash_len);
+    INFO("saved set: %d bytes", flash_len);
+    /* power cycle: defaults, then load */
+    uint8_t blob[256]; int len = flash_len; memcpy(blob, flash_blob, len);
+    sim_init(&S);
+    CHECK(S.servo.cfg.pos_kp == 100.0f && S.can.stream_ms == 0, "defaults after init");
+    int applied = params_load(&S.servo, &S.can, blob, len);
+    INFO("loaded %d values", applied);
+    CHECK(applied == 19, "applied %d of 19", applied);
+    CHECK(S.servo.cfg.pos_kp == 77.0f && S.servo.cfg.vel_kp == 0.05f && S.servo.cfg.detent_nm == 0.03f, "values after load");
+    CHECK(S.can.stream_ms == 250 && S.servo.cfg.r_ohm == 1.25f, "stream / R after load");
+    CHECK(fabsf(S.servo.kp_i - S.servo.cfg.l_h * 6.2831853f * S.servo.cfg.cur_bw_hz) < 1e-3f, "PI gains recomputed");
+    /* damaged blobs change nothing */
+    sim_init(&S);
+    uint8_t bad[256]; memcpy(bad, blob, len); bad[10] ^= 0x40;
+    CHECK(params_load(&S.servo, &S.can, bad, len) == -1 && S.servo.cfg.pos_kp == 100.0f, "bit flip not detected");
+    CHECK(params_load(&S.servo, &S.can, blob, len - 3) == -1 && S.servo.cfg.pos_kp == 100.0f, "truncated blob accepted");
+    CHECK(params_load(&S.servo, &S.can, blob, 3) == -1, "tiny blob accepted");
+    uint8_t zeros[64] = { 0 };
+    CHECK(params_load(&S.servo, &S.can, zeros, sizeof zeros) == -1, "zero blob accepted");
+    /* not while running */
+    sim_init(&S);
+    if (start_run(&S)) CHECK(params_load(&S.servo, &S.can, blob, len) == -1 && S.servo.cfg.pos_kp == 100.0f, "loaded while running");
+    /* restore defaults over CAN */
+    sim_init(&S);
+    pset(&S, 0x0307, bitsof(55.0f), &v); pset(&S, 0x0300, bitsof(3.0f), &v);
+    sim_can_cmd(&S, 0x36, NULL, 0); sim_run(&S, 0.003);
+    CHECK(S.servo.cfg.pos_kp == 100.0f && fabsf(S.servo.cfg.r_ohm - SIM_M_R) < 1e-6f, "defaults not restored");
+    CHECK(fabsf(S.servo.kp_i - S.servo.cfg.l_h * 6.2831853f * S.servo.cfg.cur_bw_hz) < 1e-3f && fabsf(S.servo.ki_i - S.servo.cfg.r_ohm * 6.2831853f * S.servo.cfg.cur_bw_hz) < 1e-2f, "PI gains after defaults");
+}
+
+static void dump_params_md(void)
+{
+    printf("### %s\n\n| id | name | type | unit | range | flags |\n|---|---|---|---|---|---|\n", SV_BOARD_NAME);
+    static const char *tn[] = { "f32", "i32", "u16", "u8" };
+    for (int i = 0; i < params_count(); i++) {
+        const param_def_t *d = params_at(i);
+        char fl[32] = "";
+        if (d->flags & PF_RO) strcat(fl, "read-only ");
+        if (d->flags & PF_OFF_ONLY) strcat(fl, "drive off ");
+        if (d->flags & PF_PERSIST) strcat(fl, "saved");
+        char rng[64];
+        if (d->flags & PF_RO) snprintf(rng, sizeof rng, "-"); else snprintf(rng, sizeof rng, "%g .. %g", d->min, d->max);
+        printf("| 0x%04X | %s | %s | %s | %s | %s |\n", d->id, d->name, tn[d->type], d->unit, rng, fl);
+    }
+    printf("\n");
+}
+
 static void test_commands(void)
 {
     printf("[CAN commands]\n");
@@ -382,10 +602,11 @@ static void test_commands(void)
     servo_cfg_t big = S.servo.cfg; servo_t tmp;
     big.i_trip = 100.0f; servo_init(&tmp, &big);                     /* trip level above the amplifier range */
     CHECK(tmp.cfg.i_trip <= 0.9f * SV_I_FULLSCALE + 1e-6f, "trip level %.1f A beyond the sensing range %.1f A", tmp.cfg.i_trip, SV_I_FULLSCALE);
-    f.len = 6; f.data[0] = 0x30; f.data[1] = 0; float nan = NAN; memcpy(f.data + 2, &nan, 4);
+    f.len = 7; f.data[0] = 0x30; f.data[1] = 0x07; f.data[2] = 0x03;       /* pos_kp = NaN */
+    float nan = NAN; memcpy(f.data + 3, &nan, 4);
     float before = S.servo.cfg.pos_kp;
     n = can_proto_rx(&S.can, &S.servo, &f, r);
-    CHECK(r[0].data[1] == 1 && S.servo.cfg.pos_kp == before, "NaN gain accepted");
+    CHECK(n == 1 && r[0].id == 0x381 && r[0].data[1] == PS_BAD_ARG && S.servo.cfg.pos_kp == before, "NaN gain accepted");
 }
 
 static void test_faults(void)
@@ -495,10 +716,15 @@ static void demo(const char *path)
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--params-md")) { dump_params_md(); return 0; }
     if (argc > 2 && !strcmp(argv[1], "--demo")) { demo(argv[2]); return 0; }
     printf("virtual %s: %.1f A max, %.2f Nm, sense %.2f mA/LSB, range +-%.1f A\n\n", SV_BOARD_NAME, SIM_I_MAX, TL, SV_AMPS_PER_LSB * 1000, SV_I_FULLSCALE);
     test_mt6816_codec();
     test_commands();
+    test_params();
+    test_params_running();
+    test_param_effect();
+    test_param_store();
     test_calibration();
     test_no_detent_model();
     test_param_mismatch();

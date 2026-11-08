@@ -3,7 +3,7 @@
 `ctrl/` is a closed-loop stepper controller with force feedback over CAN. It is plain C with
 float, no register access and no stmbl dependencies, so the same files run on the
 Cortex-M4F and in `sim/`, a model of the whole drive (motor, bridges, shunt amplifier, ADC,
-encoder, CAN), built for either board: `make -C sim check` runs 117 checks for each, SERVO57D
+encoder, CAN), built for either board: `make -C sim check` runs 493 checks for each, SERVO57D
 (NEMA23) and SERVO42D (NEMA17), in about 50 s. The board is a build flag, `-DSV_BOARD_57D` or
 `-DSV_BOARD_42D`, which picks `ctrl/servo_hw_57d.h` or `servo_hw_42d.h` (shunt value, divider,
 sense signs) and `sim/sim_board.h` (motor and gains of the virtual drive); see `hardware_42d.md`.
@@ -47,8 +47,8 @@ Rates: current loop 20 kHz (one PWM period), velocity and position 2 kHz.
    streak. A fault puts all legs low (brake). Stall (current at the limit with a position
    error over 200 counts for 0.2 s) is a status flag, not a fault.
 
-Size on the M4F (`-Os`, hard float): about 3.4 kB flash for the three files plus `sinf`, `cosf`
-and `sqrtf` from the library, and 264 bytes of RAM for the state.
+Size on the M4F (`-Os`, hard float): about 6.9 kB flash for the four files (the parameter table is about 3 kB of it) plus `sinf`, `cosf`
+and `sqrtf` from the library, and about 400 bytes of RAM for the state.
 
 ## CAN protocol
 
@@ -56,10 +56,20 @@ Defined in `ctrl/can_proto.h` (11-bit IDs, little endian, node id `n`):
 
 | frame | ID | content |
 |---|---|---|
-| command | `0x100+n` | enable, mode, torque / velocity / position target, current limit, stream period, gains, read once, clear fault |
+| command | `0x100+n` | enable, mode, torque / velocity / position target, current limit, stream period, **get / set / enumerate / save any parameter**, restore defaults, read once, clear fault |
 | reply | `0x080+n` | command code, status (0 ok, 1 bad argument, 2 unknown) |
+| parameter reply | `0x380+n` | command code, status, parameter id, value (4 bytes) |
 | telemetry A | `0x180+n` | position (counts, multi-turn), position error, state / mode / stall, fault bits |
 | telemetry B | `0x280+n` | **iq (mA), torque (mNm)**, speed (0.1 rpm), supply (10 mV) |
+
+### Parameters
+
+Every setting and every measured value is a parameter with a fixed id, type, range, unit and flags, in one table (`ctrl/params.c`; list in `can_params.md`): 44 of them, 24 writable, 19 in the saved set. CAN commands `0x30` set, `0x31` get, `0x32` info (type, flags, minimum, maximum), `0x33` enumerate by index, `0x35` save, `0x36` restore defaults.
+
+- **Checked on write:** the range, NaN / infinity, read-only, and relations (`vbus_min < vbus_max`, the runtime current limit at most `i_max`). The reply carries the value now stored, so a refused write shows what is still in effect.
+- **Drive off only:** motor R, L, pole pairs, current-loop bandwidth and the align current can only change while the drive is off or faulted (status 5 otherwise). Changing R, L or the bandwidth recomputes the current-loop PI gains.
+- **Saved set:** `params_save` serialises the 19 saved parameters (120 bytes with a header and CRC-16); `params_load` applies a blob only if the CRC and the length are right and the drive is off, and skips values out of range. Writing the blob to flash is the MCU glue's job (`can_proto_t.save_cb`); without it the save command answers status 6. The simulator stores it in RAM and checks the round trip across a restart.
+- **Not parameters:** the CAN bit rate is a hardware setting and is not on this list yet.
 
 Telemetry is sent only on request (`0x40`) or at the period set by `0x21`. It is a different protocol
 from MakerBase's (frame layout and command codes); the stock manual's commands are not

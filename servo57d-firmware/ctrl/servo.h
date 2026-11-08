@@ -47,6 +47,8 @@ typedef struct {
 
 typedef struct {
     servo_cfg_t cfg;
+    servo_cfg_t cfg_default;       /* what the config returns to on `restore defaults` */
+    uint32_t    fw_version, board_id;
     sv_state_t  state;
     sv_mode_t   mode;
     uint32_t    fault;
@@ -93,6 +95,7 @@ typedef struct {
 void servo_init(servo_t *s, const servo_cfg_t *cfg);
 void servo_enable(servo_t *s, bool on);          /* on: run CAL, ALIGN, PHASE_DIR, RUN */
 void servo_clear_fault(servo_t *s);
+void servo_recalc(servo_t *s);                    /* PI gains from R, L and bandwidth; call after changing them */
 
 void servo_set_mode(servo_t *s, sv_mode_t m);
 void servo_set_torque(servo_t *s, float iq_a);

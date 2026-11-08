@@ -35,9 +35,17 @@ void servo_init(servo_t *s, const servo_cfg_t *cfg)
     s->enc_dir = 1;
     s->off_a = s->off_b = SV_VREF / SV_VDDA * SV_ADC_FULL;
     s->vbus = 0;
-    float wc = TWO_PI * cfg->cur_bw_hz;
-    s->kp_i = cfg->l_h * wc;                 /* pole-zero cancelling PI */
-    s->ki_i = cfg->r_ohm * wc;
+    s->cfg_default = s->cfg;
+    s->fw_version = SV_FW_VERSION;
+    s->board_id = SV_BOARD_ID;
+    servo_recalc(s);
+}
+
+void servo_recalc(servo_t *s)
+{
+    float wc = TWO_PI * s->cfg.cur_bw_hz;
+    s->kp_i = s->cfg.l_h * wc;               /* pole-zero cancelling PI */
+    s->ki_i = s->cfg.r_ohm * wc;
 }
 
 void servo_enable(servo_t *s, bool on)

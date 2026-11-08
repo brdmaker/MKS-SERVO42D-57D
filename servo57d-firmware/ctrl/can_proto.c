@@ -1,4 +1,5 @@
 #include "can_proto.h"
+#include "params.h"
 #include <string.h>
 #include <math.h>
 
@@ -49,12 +50,43 @@ int can_proto_rx(can_proto_t *c, servo_t *s, const can_frame_t *in, can_frame_t 
     case 0x12: if (in->len < 5) status = 1; else servo_set_position(s, get32(d + 1)); break;
     case 0x20: if (in->len < 3) status = 1; else servo_set_current_limit(s, (uint16_t)get16(d + 1) * 0.001f); break;
     case 0x21: if (in->len < 3) status = 1; else { c->stream_ms = (uint16_t)get16(d + 1); c->countdown_ms = c->stream_ms; } break;
-    case 0x30:
-        if (in->len < 6 || d[1] > 2) { status = 1; break; }
-        { float g; memcpy(&g, d + 2, 4);
-          if (!(g >= 0.0f) || g > 1e6f) { status = 1; break; }
-          if (d[1] == 0) s->cfg.pos_kp = g; else if (d[1] == 1) s->cfg.vel_kp = g; else s->cfg.vel_ki = g; }
-        break;
+    case 0x30: case 0x31: case 0x32: case 0x33: {
+        int want = d[0] == 0x30 ? 7 : (d[0] == 0x32 ? 4 : 3);
+        if (in->len < want) { out[n].len = 8; out[n].id = 0x380 + c->node; out[n].data[0] = d[0]; out[n].data[1] = PS_BAD_ARG;
+                              memset(out[n].data + 2, 0, 6); n++; return n; }
+        uint16_t id = (uint16_t)(d[1] | d[2] << 8);
+        uint32_t val = 0; int st = PS_OK; uint8_t sel = 0;
+        if (d[0] == 0x30) {
+            uint32_t raw = (uint32_t)d[3] | (uint32_t)d[4] << 8 | (uint32_t)d[5] << 16 | (uint32_t)d[6] << 24;
+            st = params_set(s, c, id, raw);
+            if (st == PS_OK || st == PS_RANGE || st == PS_RUNNING) params_get(s, c, id, &val);   /* what is stored now */
+        } else if (d[0] == 0x31) {
+            st = params_get(s, c, id, &val);
+        } else if (d[0] == 0x32) {
+            const param_def_t *pd = params_find(id);
+            sel = d[3];
+            if (!pd) st = PS_UNKNOWN;
+            else if (sel == 0) val = (uint32_t)pd->type | (uint32_t)pd->flags << 8;
+            else if (sel == 1) memcpy(&val, &pd->min, 4);
+            else if (sel == 2) memcpy(&val, &pd->max, 4);
+            else st = PS_BAD_ARG;
+        } else {
+            if (id == 0xFFFF) val = (uint32_t)params_count();
+            else { const param_def_t *pd = params_at(id); if (pd) val = pd->id; else st = PS_UNKNOWN; }
+        }
+        out[n].id = 0x380 + c->node; out[n].len = 8;
+        out[n].data[0] = d[0]; out[n].data[1] = (uint8_t)(st | (sel << 4));
+        out[n].data[2] = d[1]; out[n].data[3] = d[2];
+        put32(out[n].data + 4, val);
+        n++;
+        return n; }
+    case 0x35: {
+        uint8_t blob[192];
+        size_t len = params_save(s, c, blob, sizeof blob);
+        if (!c->save_cb) status = PS_UNAVAIL;
+        else if (len == 0 || c->save_cb(blob, (uint16_t)len) != 0) status = 1;
+        break; }
+    case 0x36: status = params_defaults(s, c); break;
     case 0x40: can_proto_telemetry(c, s, &out[0], &out[1]); n = 2; break;
     case 0x7F: servo_clear_fault(s); break;
     default: status = 2; break;

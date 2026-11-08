@@ -12,6 +12,9 @@
 #include "servo_hw_57d.h"
 #endif
 
+/* firmware protocol version, raised when the CAN frames or the parameter ids change */
+#define SV_FW_VERSION    1
+
 #define SV_PWM_HZ        20000.0f   /* current-loop rate; one PWM period */
 #define SV_TS            (1.0f / SV_PWM_HZ)
 
