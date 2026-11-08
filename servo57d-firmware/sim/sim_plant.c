@@ -21,6 +21,7 @@ void sim_default_motor(sim_motor_t *m)
     m->j = SIM_M_J; m->b = SIM_M_B; m->tdet = SIM_M_TDET;
     m->enc_sign = 1;
     m->th = 0.37;                    /* arbitrary start angle */
+    m->stop_lo = -1e9; m->stop_hi = 1e9;
 }
 
 void sim_default_hw(sim_hw_t *h)
@@ -111,6 +112,8 @@ static void motor_step(sim_t *s, double dt, double va, double vb)
     if (m->locked) { m->w = 0; return; }
     m->w += dt * (t - t_ext) / m->j;
     m->th += dt * m->w;
+    if (m->th > m->stop_hi) { m->th = m->stop_hi; if (m->w > 0) m->w = 0; }
+    if (m->th < m->stop_lo) { m->th = m->stop_lo; if (m->w < 0) m->w = 0; }
 }
 
 /* One 62.5 ns step of the electronics. */

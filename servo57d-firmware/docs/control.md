@@ -3,8 +3,8 @@
 `ctrl/` is a closed-loop stepper controller with force feedback over CAN. It is plain C with
 float, no register access and no stmbl dependencies, so the same files run on the
 Cortex-M4F and in `sim/`, a model of the whole drive (motor, bridges, shunt amplifier, ADC,
-encoder, CAN), built for either board: `make -C sim check` runs 114 checks for each, SERVO57D
-(NEMA23) and SERVO42D (NEMA17), in about 25 s. The board is a build flag, `-DSV_BOARD_57D` or
+encoder, CAN), built for either board: `make -C sim check` runs 117 checks for each, SERVO57D
+(NEMA23) and SERVO42D (NEMA17), in about 50 s. The board is a build flag, `-DSV_BOARD_57D` or
 `-DSV_BOARD_42D`, which picks `ctrl/servo_hw_57d.h` or `servo_hw_42d.h` (shunt value, divider,
 sense signs) and `sim/sim_board.h` (motor and gains of the virtual drive); see `hardware_42d.md`.
 
@@ -24,11 +24,17 @@ Rates: current loop 20 kHz (one PWM period), velocity and position 2 kHz.
    each current channel to get the zero-current offsets. It waits for the shaft to stand
    still (a moving rotor would put back-EMF current into the offsets); 3 s without a
    standstill is a fault.
-2. **Align and find direction (`SV_ALIGN`, `SV_PHASE_DIR`).** A current vector at electrical
-   angle 0, then at +90 degrees. Averages the encoder at both, which gives the electrical
-   offset and whether the encoder counts with or against positive torque.
-   A shaft that does not move by about a quarter of an electrical period is a
-   `SV_FLT_PHASING` fault. `raw * pole_pairs mod 16384` is the exact electrical angle.
+2. **Align and find direction (`SV_ALIGN`, `SV_PHASE_DIR`, `SV_PHASE_NEG`).** About 2 s. A
+   current vector holds at electrical angle 0; it then turns slowly to +90 degrees (0.2 s) and on
+   to -90 degrees (0.4 s). The rotor follows the vector, so it can only move with it or stay held;
+   a jump to a new equilibrium could alias into the wrong direction. The encoder is averaged at
+   the three points. A free shaft moves a quarter electrical turn between them (82 counts for 50
+   pole pairs). A step counts only within 15 % of that and with the right sign, and the
+   direction and the electrical offset come from the steps that count. So a shaft held by an
+   endstop in one direction is still phased from the free one; if no step counts (blocked
+   or disconnected shaft, wrong pole-pair setting, a stop in both directions) it is a
+   `SV_FLT_PHASING` fault: the safe outcome, since a wrong direction would be positive feedback.
+   `raw * pole_pairs mod 16384` is the exact electrical angle.
 3. **Run (`SV_RUN`).** Field-oriented: the coil currents are projected on the rotor flux axis
    (`id`, `iq`). `id = 0`, `iq` is the torque current. The PI controllers are tuned by
    pole-zero cancellation from the configured `R`, `L` and bandwidth (1 kHz), with
@@ -76,6 +82,7 @@ Numbers from `make -C sim check`:
 |---|---|---|
 | offset calibration | within 0.1 LSB; waits 34 ms for a shaft still rolling into a detent | within 0.2 LSB; waits 16 ms |
 | phasing | flux angle error under 0.3 degrees, 3 start angles, both magnet orientations | under 0.1 degrees |
+| **phasing against a hard endstop** | 64 starts (both stop sides, both encoder orientations, 16 start phases): 35 phased (worst flux error 1.0 degrees), 29 refused with a phasing fault, **0 wrong** | 38 phased (1.1 degrees), 26 refused, **0 wrong** |
 | current step (rotor blocked), 2/3 of the limit | 10–90 % rise 360 us, 0.4 % overshoot, 1 % low | 320 us, 0.7 %, 1 % low |
 | position steps 2000 / 5000 / 16384 counts | settle (+-8 counts) in 45 / 121 / 234 ms, 0 counts final error | 53 / 69 / 143 ms, 0 to 1 count |
 | velocity 120 rpm | within 0.1 %, reverse too | within 0.1 % |
@@ -84,6 +91,8 @@ Numbers from `make -C sim check`:
 | motor parameters wrong | R +50 % / L -40 %, R -33 % / L +50 %: position error 0, torque correct; Kt +20 %: torque reads 20 % high | same |
 | no detent compensation | hunts about +-30 counts, torque 9 % low at 37 % of the limit | hunts +-55 counts (the NEMA17's detent is a larger share of its torque), torque 8 % high |
 | faults | undervoltage, parity streak, No_Mag, blocked shaft trip; two parity glitches ignored; clears over CAN | same; the trip level is clamped to 90 % of the sensing range |
+
+**At an endstop.** Phasing needs the shaft free to move about 1.8 degrees either way. Pressed against a stop with no play it works about half the time (when the stop is on the far side of the vector's travel) and otherwise stops with a phasing fault; move the axis off the stop and enable again. Use a lower `i_align` there: the align current pushes against the stop for about 2 s. A first version that jumped the vector between equilibria accepted a wrong, reversed direction in one of 12 test starts; the slow turn removed that.
 
 What the simulator found while it was being built (all fixed in the core): calibration run
 while the shaft was still moving put 16 LSB (0.1 A) of error on one channel; position

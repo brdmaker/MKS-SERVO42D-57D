@@ -11,7 +11,7 @@
 
 #define SV_SLOW_DIV 10             /* fast ticks per slow tick -> 2 kHz */
 
-typedef enum { SV_OFF, SV_CAL, SV_ALIGN, SV_PHASE_DIR, SV_RUN, SV_FAULT } sv_state_t;
+typedef enum { SV_OFF, SV_CAL, SV_ALIGN, SV_PHASE_DIR, SV_RUN, SV_FAULT, SV_PHASE_NEG } sv_state_t;
 typedef enum { SV_MODE_TORQUE, SV_MODE_VELOCITY, SV_MODE_POSITION } sv_mode_t;
 
 #define SV_FLT_OVERCURRENT 0x01
@@ -76,7 +76,7 @@ typedef struct {
     uint32_t tick, phase_tick;
     float   acc_a, acc_b;
     int32_t ph_sum, ph_ref; int ph_n;
-    float   align_mean, dir_mean;
+    float   align_mean, dir_mean, neg_mean;   /* encoder at the 0, +90 and -90 degree vectors */
     float   kp_i, ki_i, int_d, int_q;
     float   int_vel;
     float   iq_ref;                /* current command from the slow loop, A */

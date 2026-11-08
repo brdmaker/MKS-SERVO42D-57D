@@ -67,7 +67,7 @@ static void fresh(void)
 static bool start_run(sim_t *s)
 {
     cmd_enable(s, 1);
-    return run_until_state(s, SV_RUN, 2.0);
+    return run_until_state(s, SV_RUN, 4.0);
 }
 
 static double enc_err_deg(sim_t *s)   /* core's flux angle minus the true one, at standstill */
@@ -145,6 +145,35 @@ static void test_phasing(int enc_sign, double th0)
     CHECK(S.servo.enc_dir == enc_sign, "enc_dir %d", S.servo.enc_dir);
     CHECK(fabs(e) < 5.0, "flux angle error %.2f deg", e);
     CHECK(fabs(S.servo.ia) < 0.15 && fabs(S.servo.ib) < 0.15, "idle current %.3f %.3f A", S.servo.ia, S.servo.ib);
+}
+
+static void test_endstop(void)
+{
+    printf("[phasing with the shaft against a hard endstop]\n");
+    int good = 0, safe = 0, wrong = 0, other = 0; double worst = 0;
+    for (int side = -1; side <= 1; side += 2) {
+        for (int k = 0; k < 6; k++) {                     /* 6 start phases across one electrical turn */
+            double th0 = 0.37 + k * (TWO_PI / 50 / 6);
+            fresh();
+            S.m.th = th0;
+            if (side > 0) S.m.stop_hi = th0; else S.m.stop_lo = th0;
+            cmd_enable(&S, 1);
+            run_until_state(&S, SV_RUN, 4.0);
+            if (S.servo.state == SV_RUN) {
+                sim_run(&S, 0.05);
+                double e = enc_err_deg(&S);
+                if (fabs(e) > worst) worst = fabs(e);
+                if (S.servo.enc_dir == 1 && fabs(e) < 25.0) good++;
+                else { wrong++; INFO("wrong: stop %+d, start %d, enc_dir %d, flux error %.0f deg (steps %.1f / %.1f counts)", side, k, S.servo.enc_dir, e, S.servo.dir_mean - S.servo.align_mean, S.servo.neg_mean - S.servo.align_mean); }
+            } else if (S.servo.state == SV_FAULT && (S.servo.fault & SV_FLT_PHASING)) safe++;
+            else other++;
+        }
+    }
+    INFO("12 starts against a stop: %d phased (worst flux error %.0f deg), %d refused with a phasing fault, %d wrong, %d other",
+         good, worst, safe, wrong, other);
+    CHECK(wrong == 0, "%d starts accepted a wrong phasing at an endstop", wrong);
+    CHECK(other == 0, "%d starts neither ran nor faulted", other);
+    CHECK(good >= 4, "only %d of 12 starts at an endstop phased", good);
 }
 
 static void test_current_step(void)
@@ -400,7 +429,7 @@ static void test_faults(void)
     fresh();
     S.m.locked = true;
     cmd_enable(&S, 1);
-    run_until_state(&S, SV_RUN, 2.0);
+    run_until_state(&S, SV_RUN, 4.0);
     CHECK(S.servo.state == SV_FAULT && (S.servo.fault & SV_FLT_PHASING), "blocked shaft not detected (state %d fault 0x%x)",
           S.servo.state, S.servo.fault);
 }
@@ -476,6 +505,7 @@ int main(int argc, char **argv)
     test_phasing(+1, 0.37);
     test_phasing(-1, 2.9);
     test_phasing(+1, -4.1);
+    test_endstop();
     test_current_step();
     test_position();
     test_velocity();

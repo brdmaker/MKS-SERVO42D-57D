@@ -29,6 +29,7 @@ typedef struct {
     float t_spring;                  /* Nm/rad about th_spring0 (0 = none) */
     double th_spring0;
     bool  locked;                    /* rotor blocked (current-step tests) */
+    double stop_lo, stop_hi;         /* hard mechanical endstops, rad (default: none) */
     int   enc_sign;                  /* magnet orientation: encoder counts up with th * enc_sign */
     /* truth for the tests */
     float t_elec;                    /* torque from the coils, Nm */

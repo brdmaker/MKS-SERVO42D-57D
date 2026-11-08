@@ -4,13 +4,17 @@
 #include <stdlib.h>
 
 #define TWO_PI        6.2831853f
+#define M_PI_F        3.1415927f
 #define CAL_SETTLE    16
 #define CAL_N         128
 #define ALIGN_RAMP    2000          /* 0.1 s */
 #define ALIGN_SETTLE  6000          /* until 0.3 s */
 #define ALIGN_AVG     6000          /* average over 0.3 s */
-#define DIR_SETTLE    6000
-#define DIR_AVG       6000
+#define DIR_SETTLE    4000
+#define DIR_AVG       4000
+#define RAMP_P        4000          /* the vector turns 0 -> +90 degrees in 0.2 s, rotor following */
+#define RAMP_N        8000          /* then +90 -> -90 degrees in 0.4 s */
+#define PHASE_TOL     0.15f         /* of the expected step (a quarter electrical turn) */
 #define STALL_TICKS   4000          /* 0.2 s at the torque limit */
 #define ENC_FAULT_RUN 3
 #define CAL_STILL     2             /* counts the shaft may move during CAL */
@@ -130,6 +134,34 @@ static void slow(servo_t *s)
     }
 }
 
+/* Phasing result from three equilibria: the rotor at the 0, +90 and -90 degree vectors.
+ * A free shaft moves E = a quarter electrical turn between them. A step counts only if it
+ * is within PHASE_TOL of E and of the right sign, so a shaft held by an endstop can still
+ * be phased from the free direction, and a stopped or disturbed one is refused instead of
+ * giving a wrong encoder direction (which would be positive feedback). */
+static bool phase_decide(servo_t *s)
+{
+    float E = (float)SV_ENC_COUNTS / (4.0f * (float)s->cfg.pole_pairs);
+    float dp = s->dir_mean - s->align_mean, dm = s->neg_mean - s->align_mean;
+    for (int d = 1; d >= -1; d -= 2) {
+        bool vp = fabsf(dp - d * E) < PHASE_TOL * E;
+        bool vm = fabsf(dm + d * E) < PHASE_TOL * E;
+        if (!vp && !vm) continue;
+        if (!vp && (float)d * dp < -PHASE_TOL * E) return false;      /* moved the wrong way */
+        if (!vm && (float)d * dm >  PHASE_TOL * E) return false;
+        float sum = 0.0f; int n = 0;
+        if (vp) { sum += s->dir_mean - d * E; n++; }
+        if (vm) { sum += s->neg_mean + d * E; n++; }
+        if (vp && vm) { sum += s->align_mean; n++; }   /* the align point is trusted only if both agree */
+        float raw0 = fmodf(sum / (float)n, (float)SV_ENC_COUNTS);
+        float te = fmodf((float)d * raw0 * (float)s->cfg.pole_pairs, (float)SV_ENC_COUNTS);
+        s->enc_dir = d;
+        s->theta_off = -te * (TWO_PI / SV_ENC_COUNTS);
+        return true;
+    }
+    return false;
+}
+
 void servo_fast(servo_t *s, uint16_t adc_a, uint16_t adc_b, uint16_t adc_vbus,
                 uint16_t enc14, uint8_t enc_flags, servo_out_t *out)
 {
@@ -152,7 +184,7 @@ void servo_fast(servo_t *s, uint16_t adc_a, uint16_t adc_b, uint16_t adc_vbus,
     s->ia = SV_SENSE_SIGN_A * ((float)adc_a - s->off_a) * SV_AMPS_PER_LSB;
     s->ib = SV_SENSE_SIGN_B * ((float)adc_b - s->off_b) * SV_AMPS_PER_LSB;
 
-    bool active = s->state == SV_ALIGN || s->state == SV_PHASE_DIR || s->state == SV_RUN;
+    bool active = s->state == SV_ALIGN || s->state == SV_PHASE_DIR || s->state == SV_PHASE_NEG || s->state == SV_RUN;
     if (active) {
         if (fabsf(s->ia) > s->cfg.i_trip || fabsf(s->ib) > s->cfg.i_trip) trip(s, SV_FLT_OVERCURRENT);
         if (s->vbus < s->cfg.vbus_min) trip(s, SV_FLT_UNDERVOLT);
@@ -203,8 +235,19 @@ void servo_fast(servo_t *s, uint16_t adc_a, uint16_t adc_b, uint16_t adc_vbus,
         cmd_q = 0.0f;
         break; }
     case SV_PHASE_DIR:
-        theta = 0.0f; cmd_d = 0.0f; cmd_q = s->cfg.i_align;
-        break;
+    case SV_PHASE_NEG: {
+        /* A slowly turning vector: the rotor follows it or is held by something, it cannot
+         * jump to a different equilibrium, so a reading cannot alias into the wrong direction. */
+        float phi;
+        if (s->state == SV_PHASE_DIR) {
+            float r = (float)s->phase_tick / RAMP_P; if (r > 1.0f) r = 1.0f;
+            phi = 0.5f * (float)M_PI_F * r;
+        } else {
+            float r = (float)s->phase_tick / RAMP_N; if (r > 1.0f) r = 1.0f;
+            phi = 0.5f * (float)M_PI_F * (1.0f - 2.0f * r);
+        }
+        theta = 0.0f; cmd_d = s->cfg.i_align * cosf(phi); cmd_q = s->cfg.i_align * sinf(phi);
+        break; }
     default: {
         int32_t te = ((int32_t)(s->enc_dir * (int32_t)enc14 * s->cfg.pole_pairs)) & (SV_ENC_COUNTS - 1);
         float we = s->vel * (float)s->cfg.pole_pairs;
@@ -265,25 +308,24 @@ void servo_fast(servo_t *s, uint16_t adc_a, uint16_t adc_b, uint16_t adc_vbus,
             s->state = SV_PHASE_DIR; s->phase_tick = 0; s->ph_n = 0; s->ph_sum = 0;
             s->int_d = s->int_q = 0;
         }
-    } else if (s->state == SV_PHASE_DIR) {
-        if (s->phase_tick > DIR_SETTLE) {
+    } else if (s->state == SV_PHASE_DIR || s->state == SV_PHASE_NEG) {
+        uint32_t pre = s->state == SV_PHASE_NEG ? RAMP_N : RAMP_P;
+        if (s->phase_tick > pre + DIR_SETTLE) {
             if (s->ph_n == 0) s->ph_ref = s->pos_raw;
             s->ph_sum += s->pos_raw - s->ph_ref; s->ph_n++;
         }
-        if (s->phase_tick >= DIR_SETTLE + DIR_AVG) {
-            s->dir_mean = (float)s->ph_ref + (float)s->ph_sum / (float)s->ph_n;
-            float delta = s->dir_mean - s->align_mean;           /* raw counts moved */
-            float expect = (float)SV_ENC_COUNTS / (4.0f * (float)s->cfg.pole_pairs);
-            if (fabsf(delta) < 0.25f * expect || fabsf(delta) > 1.75f * expect) {
-                trip(s, SV_FLT_PHASING);
+        if (s->phase_tick >= pre + DIR_SETTLE + DIR_AVG) {
+            float mean = (float)s->ph_ref + (float)s->ph_sum / (float)s->ph_n;
+            s->phase_tick = 0; s->ph_n = 0; s->ph_sum = 0;
+            s->int_d = s->int_q = 0;
+            if (s->state == SV_PHASE_DIR) {
+                s->dir_mean = mean;
+                s->state = SV_PHASE_NEG;
                 return;
             }
-            s->enc_dir = delta > 0 ? 1 : -1;
+            s->neg_mean = mean;
+            if (!phase_decide(s)) { trip(s, SV_FLT_PHASING); return; }
             s->pos = s->enc_dir * s->pos_raw;
-            /* flux axis was at theta = 0 while the rotor sat at align_mean */
-            float am = fmodf(s->align_mean, (float)SV_ENC_COUNTS);
-            float te = fmodf((float)s->enc_dir * am * (float)s->cfg.pole_pairs, (float)SV_ENC_COUNTS);
-            s->theta_off = -te * (TWO_PI / SV_ENC_COUNTS);
             s->int_d = s->int_q = s->int_vel = 0;
             s->vel = 0; s->pos_prev = s->pos; s->slow_cnt = 0;
             s->cmd_pos = s->pos; s->cmd_vel = 0; s->cmd_iq = 0; s->iq_ref = 0;
