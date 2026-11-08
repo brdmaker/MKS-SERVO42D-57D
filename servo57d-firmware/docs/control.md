@@ -48,7 +48,7 @@ Rates: current loop 20 kHz (one PWM period), velocity and position 2 kHz.
    error over 200 counts for 0.2 s) is a status flag, not a fault.
 
 Size on the M4F (`-Os`, hard float): about 6.9 kB flash for the four files (the parameter table is about 3 kB of it) plus `sinf`, `cosf`
-and `sqrtf` from the library, and about 400 bytes of RAM for the state.
+and `sqrtf` from the library, and 360 bytes of RAM for the state (344 + 16).
 
 ## CAN protocol
 
