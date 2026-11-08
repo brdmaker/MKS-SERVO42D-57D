@@ -29,7 +29,7 @@ static void cmd_vel(sim_t *s, int dpm) { uint8_t a[4]; put_i32(a, dpm); sim_can_
 static void cmd_pos(sim_t *s, int32_t c) { uint8_t a[4]; put_i32(a, c); sim_can_cmd(s, 0x12, a, 4); }
 static void cmd_stream(sim_t *s, int ms) { uint8_t a[2]; put_i16(a, ms); sim_can_cmd(s, 0x21, a, 2); }
 
-typedef struct { int32_t pos; int pos_err; int state, mode, stall, fault;
+typedef struct { int32_t pos; int pos_err; int state, mode, stall, fault, unlocked;
                  int iq_ma, torque_mnm, vel_01rpm, vbus_10mv; bool have_a, have_b; } tlm_t;
 
 static void drain(sim_t *s, tlm_t *t)
@@ -39,7 +39,7 @@ static void drain(sim_t *s, tlm_t *t)
         if (f.id == 0x181) {
             t->pos = (int32_t)((uint32_t)f.data[0] | f.data[1] << 8 | (uint32_t)f.data[2] << 16 | (uint32_t)f.data[3] << 24);
             t->pos_err = (int16_t)(f.data[4] | f.data[5] << 8);
-            t->state = f.data[6] & 7; t->mode = (f.data[6] >> 4) & 7; t->stall = f.data[6] >> 7;
+            t->state = f.data[6] & 7; t->mode = (f.data[6] >> 4) & 3; t->unlocked = (f.data[6] >> 6) & 1; t->stall = f.data[6] >> 7;
             t->fault = f.data[7]; t->have_a = true;
         } else if (f.id == 0x281) {
             t->iq_ma = (int16_t)(f.data[0] | f.data[1] << 8);
@@ -406,6 +406,9 @@ static int pat(sim_t *s, uint16_t index, uint32_t *val)
     *val = (uint32_t)r.data[4] | (uint32_t)r.data[5] << 8;
     return r.data[1] & 15;
 }
+static void unlock(sim_t *s) { uint32_t v; pset(s, PID_WRITE_LOCK, SV_UNLOCK_KEY, &v); }
+static int boot_calls;
+static int boot_cb(void) { boot_calls++; return 0; }
 static uint8_t flash_blob[256]; static int flash_len;
 static int flash_cb(const uint8_t *b, uint16_t n) { memcpy(flash_blob, b, n); flash_len = n; return 0; }
 
@@ -413,6 +416,7 @@ static void test_params(void)
 {
     printf("[parameters over CAN]\n");
     fresh();
+    unlock(&S);
     uint32_t v = 0; int st;
     /* enumeration */
     st = pat(&S, 0xFFFF, &v);
@@ -426,6 +430,7 @@ static void test_params(void)
         if (!d) continue;
         if (!(d->flags & PF_RO)) rw++;
         if (d->flags & PF_PERSIST) saved++;
+        if (d->id == PID_WRITE_LOCK) continue;                        /* tested in test_lock */
         uint32_t t, mn, mx, got;
         CHECK(pinfo(&S, d->id, 0, &t) == 0 && (t & 0xFF) == (uint32_t)d->type && (t >> 8) == d->flags, "info type/flags of %s", d->name);
         CHECK(pinfo(&S, d->id, 1, &mn) == 0 && f32of(mn) == d->min, "min of %s", d->name);
@@ -459,7 +464,7 @@ static void test_params(void)
     CHECK(pset(&S, 0x0307, bitsof(NAN), &v) == PS_BAD_ARG, "NaN");
     CHECK(pset(&S, 0x0307, bitsof(INFINITY), &v) == PS_BAD_ARG, "infinity");
     /* relation between vbus limits */
-    fresh();
+    fresh(); unlock(&S);
     CHECK(pset(&S, 0x030B, bitsof(35.0f), &v) == PS_RANGE, "vbus_min above vbus_max accepted");
     CHECK(pset(&S, 0x030C, bitsof(9.0f), &v) == PS_RANGE, "vbus_max below vbus_min accepted");
     /* identity */
@@ -472,6 +477,7 @@ static void test_params_running(void)
     printf("[parameters while running]\n");
     fresh();
     if (!start_run(&S)) { CHECK(0, "no RUN"); return; }
+    unlock(&S);
     uint32_t v, before; pget(&S, 0x0300, &before);
     CHECK(pset(&S, 0x0300, bitsof(2.0f), &v) == PS_RUNNING && v == before, "motor_r changed while running");
     uint32_t pp; pget(&S, 0x0303, &pp);
@@ -497,7 +503,7 @@ static void test_param_effect(void)
     double rise[2];
     float bw[2] = { 1000.0f, 400.0f };
     for (int k = 0; k < 2; k++) {
-        fresh();
+        fresh(); unlock(&S);
         uint32_t v;
         CHECK(pset(&S, 0x0306, bitsof(bw[k]), &v) == PS_OK, "cur_bw");
         CHECK(pset(&S, 0x0305, bitsof((float)SIM_I_ALIGN), &v) == PS_OK, "i_align");
@@ -522,13 +528,18 @@ static void test_param_store(void)
     printf("[saving parameters]\n");
     fresh();
     uint32_t v;
-    /* no flash behind the command yet */
+    /* locked first, then no flash behind the command yet */
+    sim_can_cmd(&S, 0x35, NULL, 0);
+    sim_run(&S, 0.003);
+    { can_frame_t r; int got = 0; while (sim_can_recv(&S, &r)) if (r.id == 0x081 && r.data[0] == 0x35) { got = 1; CHECK(r.data[1] == PS_LOCKED, "save while locked: status %d", r.data[1]); } CHECK(got, "no reply to save"); }
+    unlock(&S);
     sim_can_cmd(&S, 0x35, NULL, 0);
     sim_run(&S, 0.003);
     { can_frame_t r; int got = 0; while (sim_can_recv(&S, &r)) if (r.id == 0x081 && r.data[0] == 0x35) { got = 1; CHECK(r.data[1] == PS_UNAVAIL, "save without a store: status %d", r.data[1]); } CHECK(got, "no reply to save"); }
     S.can.save_cb = flash_cb; flash_len = 0;
+    CHECK(flash_len == 0, "callback ran while locked");
     pset(&S, 0x0307, bitsof(77.0f), &v); pset(&S, 0x0308, bitsof(0.05f), &v);
-    pset(&S, 0x030F, bitsof(0.03f), &v); pset(&S, 0x0401, 250, &v); pset(&S, 0x0300, bitsof(1.25f), &v);
+    pset(&S, 0x030F, bitsof(0.03f), &v); pset(&S, 0x0004, 5000, &v); pset(&S, 0x0300, bitsof(1.25f), &v);
     sim_can_cmd(&S, 0x35, NULL, 0); sim_run(&S, 0.003);
     { can_frame_t r; while (sim_can_recv(&S, &r)) if (r.id == 0x081 && r.data[0] == 0x35) CHECK(r.data[1] == 0, "save status %d", r.data[1]); }
     CHECK(flash_len > 0 && flash_len <= (int)sizeof flash_blob, "blob length %d", flash_len);
@@ -536,12 +547,12 @@ static void test_param_store(void)
     /* power cycle: defaults, then load */
     uint8_t blob[256]; int len = flash_len; memcpy(blob, flash_blob, len);
     sim_init(&S);
-    CHECK(S.servo.cfg.pos_kp == 100.0f && S.can.stream_ms == 0, "defaults after init");
+    CHECK(S.servo.cfg.pos_kp == 100.0f && S.can.unlock_ms == 10000, "defaults after init");
     int applied = params_load(&S.servo, &S.can, blob, len);
     INFO("loaded %d values", applied);
     CHECK(applied == 19, "applied %d of 19", applied);
     CHECK(S.servo.cfg.pos_kp == 77.0f && S.servo.cfg.vel_kp == 0.05f && S.servo.cfg.detent_nm == 0.03f, "values after load");
-    CHECK(S.can.stream_ms == 250 && S.servo.cfg.r_ohm == 1.25f, "stream / R after load");
+    CHECK(S.can.unlock_ms == 5000 && S.servo.cfg.r_ohm == 1.25f, "unlock_ms / R after load");
     CHECK(fabsf(S.servo.kp_i - S.servo.cfg.l_h * 6.2831853f * S.servo.cfg.cur_bw_hz) < 1e-3f, "PI gains recomputed");
     /* damaged blobs change nothing */
     sim_init(&S);
@@ -555,7 +566,7 @@ static void test_param_store(void)
     sim_init(&S);
     if (start_run(&S)) CHECK(params_load(&S.servo, &S.can, blob, len) == -1 && S.servo.cfg.pos_kp == 100.0f, "loaded while running");
     /* restore defaults over CAN */
-    sim_init(&S);
+    sim_init(&S); unlock(&S);
     pset(&S, 0x0307, bitsof(55.0f), &v); pset(&S, 0x0300, bitsof(3.0f), &v);
     sim_can_cmd(&S, 0x36, NULL, 0); sim_run(&S, 0.003);
     CHECK(S.servo.cfg.pos_kp == 100.0f && fabsf(S.servo.cfg.r_ohm - SIM_M_R) < 1e-6f, "defaults not restored");
@@ -577,6 +588,126 @@ static void dump_params_md(void)
         printf("| 0x%04X | %s | %s | %s | %s | %s |\n", d->id, d->name, tn[d->type], d->unit, rng, fl);
     }
     printf("\n");
+}
+
+static uint32_t xr = 0x9E3779B9u;
+static uint32_t xnext(void) { xr ^= xr << 13; xr ^= xr >> 17; xr ^= xr << 5; return xr; }
+
+static void test_lock(void)
+{
+    printf("[write lock]\n");
+    fresh();
+    uint32_t v; tlm_t t; memset(&t, 0, sizeof t);
+    CHECK(pget(&S, PID_WRITE_LOCK, &v) == 0 && v == 0, "lock not closed at power-up (%u)", v);
+    sim_can_cmd(&S, 0x40, NULL, 0); sim_run(&S, 0.003); drain(&S, &t);
+    CHECK(t.have_a && !t.unlocked, "telemetry shows the lock open");
+    uint32_t before; pget(&S, 0x0307, &before);
+    /* closed: settings refused, values unchanged, reads fine */
+    uint32_t got;
+    CHECK(pset(&S, 0x0307, bitsof(55.0f), &got) == PS_LOCKED && got == before, "setting accepted while locked");
+    CHECK(pset(&S, 0x0300, bitsof(2.0f), &got) == PS_LOCKED, "motor R accepted while locked");
+    CHECK(pset(&S, 0x0004, 5000, &got) == PS_LOCKED, "unlock_ms accepted while locked");
+    CHECK(pset(&S, 0x0103, 7, &got) == PS_READ_ONLY, "read-only reports the lock instead");
+    CHECK(pset(&S, 0x7777, 0, &got) == PS_UNKNOWN, "unknown id");
+    sim_can_cmd(&S, 0x36, NULL, 0); sim_run(&S, 0.003);
+    { can_frame_t r; int ok = 0; while (sim_can_recv(&S, &r)) if (r.id == 0x081 && r.data[0] == 0x36) ok = (r.data[1] == PS_LOCKED); CHECK(ok, "defaults while locked"); }
+    /* the runtime commands stay open */
+    CHECK(pset(&S, 0x0200, 1, &got) == PS_OK && got == 1, "mode closed by the lock");
+    CHECK(pset(&S, 0x0201, bitsof(0.1f), &got) == PS_OK, "cmd_iq closed by the lock");
+    CHECK(pset(&S, 0x0204, bitsof(0.5f), &got) == PS_OK, "ilim closed by the lock");
+    cmd_mode(&S, SV_MODE_POSITION); cmd_stream(&S, 0);
+    /* wrong keys */
+    uint32_t bad[] = { 0, 1, 0xFFFFFFFFu, SV_UNLOCK_KEY ^ 1u, SV_UNLOCK_KEY ^ 0x80000000u, ~SV_UNLOCK_KEY };
+    for (unsigned i = 0; i < sizeof bad / sizeof *bad; i++) {
+        pset(&S, PID_WRITE_LOCK, bad[i], &got);
+        CHECK(got == 0 && pset(&S, 0x0307, bitsof(55.0f), &v) == PS_LOCKED, "wrong key 0x%08x opened the lock", bad[i]);
+    }
+    /* right key */
+    CHECK(pset(&S, PID_WRITE_LOCK, SV_UNLOCK_KEY, &got) == PS_OK && got > 9000, "unlock: %u ms left", got);
+    sim_can_cmd(&S, 0x40, NULL, 0); sim_run(&S, 0.003); drain(&S, &t);
+    CHECK(t.unlocked, "telemetry does not show the open lock");
+    CHECK(pset(&S, 0x0307, bitsof(55.0f), &got) == PS_OK && f32of(got) == 55.0f, "write refused when unlocked");
+    /* a bad value does not close it, a wrong write to the register does */
+    CHECK(pset(&S, 0x0307, bitsof(5000.0f), &got) == PS_RANGE, "range");
+    CHECK(pget(&S, PID_WRITE_LOCK, &got) == 0 && got > 0, "lock closed by a refused value");
+    pset(&S, PID_WRITE_LOCK, 0, &got);
+    CHECK(got == 0 && pset(&S, 0x0307, bitsof(60.0f), &v) == PS_LOCKED, "explicit lock");
+    /* timeout and refresh */
+    unlock(&S);
+    CHECK(pset(&S, PID_UNLOCK_MS, 1000, &got) == PS_OK, "unlock_ms");
+    pset(&S, PID_WRITE_LOCK, 0, &got); unlock(&S);
+    sim_run(&S, 0.5);
+    pget(&S, PID_WRITE_LOCK, &got);
+    INFO("500 ms after opening: %u ms left of 1000", got);
+    CHECK(got > 400 && got < 520, "countdown %u", got);
+    for (int i = 0; i < 6; i++) {                                    /* a write every 0.4 s keeps it open for 2.4 s */
+        sim_run(&S, 0.4);
+        CHECK(pset(&S, 0x0307, bitsof(60.0f + i), &got) == PS_OK, "refresh %d refused", i);
+    }
+    sim_run(&S, 1.1);
+    CHECK(pset(&S, 0x0307, bitsof(70.0f), &got) == PS_LOCKED, "did not close after the timeout");
+    sim_can_cmd(&S, 0x40, NULL, 0); sim_run(&S, 0.003); drain(&S, &t);
+    CHECK(!t.unlocked, "telemetry shows it open after the timeout");
+    /* entering the bootloader: key, lock open, drive off */
+    fresh(); S.can.boot_cb = boot_cb; boot_calls = 0;
+    can_frame_t r; int st;
+    uint8_t cb[5] = { 0x50, 0, 0, 0, 0 };
+    #define BOOTCMD(k) do { cb[1] = (k) & 255; cb[2] = ((k) >> 8) & 255; cb[3] = ((k) >> 16) & 255; cb[4] = ((k) >> 24) & 255; \
+        can_frame_t f; memset(&f, 0, sizeof f); f.id = 0x101; f.len = 5; memcpy(f.data, cb, 5); sim_can_send(&S, &f); sim_run(&S, 0.003); \
+        st = -1; while (sim_can_recv(&S, &r)) if (r.id == 0x081 && r.data[0] == 0x50) st = r.data[1]; } while (0)
+    BOOTCMD(SV_UNLOCK_KEY);
+    CHECK(st == PS_LOCKED && boot_calls == 0, "boot request while locked (status %d)", st);
+    unlock(&S);
+    BOOTCMD(SV_UNLOCK_KEY ^ 1u);
+    CHECK(st == PS_BAD_ARG && boot_calls == 0, "boot request with a wrong key (status %d)", st);
+    start_run(&S);
+    unlock(&S);
+    BOOTCMD(SV_UNLOCK_KEY);
+    CHECK(st == PS_RUNNING && boot_calls == 0, "boot request while the drive runs (status %d)", st);
+    cmd_enable(&S, 0); sim_run(&S, 0.01);
+    unlock(&S);
+    BOOTCMD(SV_UNLOCK_KEY);
+    CHECK(st == 0 && boot_calls == 1, "boot request refused with the drive off (status %d, calls %d)", st, boot_calls);
+    /* stray frames: 60000 random frames. Half of the set commands name a real parameter with an in-range
+     * value, so with the lock open most of them would be accepted: the control run proves the frames bite. */
+    for (int pass = 0; pass < 2; pass++) {
+        fresh(); S.can.boot_cb = boot_cb; boot_calls = 0; S.can.save_cb = flash_cb; flash_len = 0;
+        if (pass == 1) S.can.unlock_left_ms = 0x7fffffff;           /* control: lock held open */
+        uint8_t ref[192]; size_t rl = params_save(&S.servo, &S.can, ref, sizeof ref);
+        can_frame_t f, out[4]; int accepted = 0, opened = 0;
+        for (int i = 0; i < 60000; i++) {
+            f.id = 0x100 + S.can.node; f.len = (uint8_t)(1 + xnext() % 8);   // the control run may change the node id
+            for (int k = 0; k < 8; k++) f.data[k] = (uint8_t)xnext();
+            if (i & 1) {                                              /* a set command for a real id, value in range */
+                const param_def_t *d = params_at((int)(xnext() % (unsigned)params_count()));
+                float lo = d->min, hi = d->max, fv = lo + (hi - lo) * (float)(xnext() % 1000) / 1000.0f;
+                uint32_t raw = d->type == PT_F32 ? bitsof(fv) : (uint32_t)(int32_t)fv;
+                if (d->id == PID_WRITE_LOCK) raw = xnext();           /* never the key by chance (2^-32) */
+                f.data[0] = 0x30; f.data[1] = d->id & 255; f.data[2] = d->id >> 8;
+                for (int k = 0; k < 4; k++) f.data[3 + k] = (uint8_t)(raw >> (8 * k));
+                f.len = 7;
+            } else {
+                f.data[0] = (uint8_t)(xnext() % 0x60);                /* codes 0x00..0x5F */
+            }
+            if (f.data[0] == 0x01 || f.data[0] == 0x50) f.data[0] = 0x02;   /* do not enable the drive / reboot in the control */
+            if (pass == 1 && (f.data[0] == 0x35 || f.data[0] == 0x36)) f.data[0] = 0x02;
+            if (pass == 1) S.can.unlock_left_ms = 0x7fffffff;         /* a random write to the lock register closes it: reopen */
+            int n = can_proto_rx(&S.can, &S.servo, &f, out);
+            for (int k = 0; k < n; k++) if (out[k].id == 0x380u + S.can.node && out[k].data[0] == 0x30 && (out[k].data[1] & 15) == PS_OK) accepted++;
+            if (pass == 0 && params_unlocked(&S.can)) opened++;
+        }
+        uint8_t now[192]; size_t nl = params_save(&S.servo, &S.can, now, sizeof now);
+        bool same = nl == rl && memcmp(ref, now, rl) == 0;
+        if (pass == 0) {
+            INFO("60000 stray frames, lock closed: %d set commands accepted (runtime ones only), saved set %s, flash saves %d, boot calls %d",
+                 accepted, same ? "unchanged" : "CHANGED", flash_len ? 1 : 0, boot_calls);
+            CHECK(same, "a stray frame changed a saved setting");
+            CHECK(flash_len == 0 && boot_calls == 0 && opened == 0, "a stray frame saved, rebooted or opened the lock");
+        } else {
+            INFO("control, lock held open: %d set commands accepted, saved set %s", accepted, same ? "unchanged" : "changed");
+            CHECK(!same && accepted > 3000, "the control run does not change the settings: the fuzz is too weak (%d accepted)", accepted);
+        }
+    }
 }
 
 static void test_commands(void)
@@ -602,6 +733,7 @@ static void test_commands(void)
     servo_cfg_t big = S.servo.cfg; servo_t tmp;
     big.i_trip = 100.0f; servo_init(&tmp, &big);                     /* trip level above the amplifier range */
     CHECK(tmp.cfg.i_trip <= 0.9f * SV_I_FULLSCALE + 1e-6f, "trip level %.1f A beyond the sensing range %.1f A", tmp.cfg.i_trip, SV_I_FULLSCALE);
+    S.can.unlock_left_ms = 1000;                                     /* write lock open */
     f.len = 7; f.data[0] = 0x30; f.data[1] = 0x07; f.data[2] = 0x03;       /* pos_kp = NaN */
     float nan = NAN; memcpy(f.data + 3, &nan, 4);
     float before = S.servo.cfg.pos_kp;
@@ -721,6 +853,7 @@ int main(int argc, char **argv)
     printf("virtual %s: %.1f A max, %.2f Nm, sense %.2f mA/LSB, range +-%.1f A\n\n", SV_BOARD_NAME, SIM_I_MAX, TL, SV_AMPS_PER_LSB * 1000, SV_I_FULLSCALE);
     test_mt6816_codec();
     test_commands();
+    test_lock();
     test_params();
     test_params_running();
     test_param_effect();

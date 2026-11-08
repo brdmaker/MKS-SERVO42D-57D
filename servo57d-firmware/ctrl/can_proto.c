@@ -20,6 +20,7 @@ void can_proto_init(can_proto_t *c, uint8_t node)
 {
     memset(c, 0, sizeof *c);
     c->node = node;
+    c->unlock_ms = 10000;
 }
 
 void can_proto_telemetry(const can_proto_t *c, const servo_t *s, can_frame_t *a, can_frame_t *b)
@@ -27,7 +28,7 @@ void can_proto_telemetry(const can_proto_t *c, const servo_t *s, can_frame_t *a,
     a->id = 0x180 + c->node; a->len = 8;
     put32(a->data, (uint32_t)s->pos);
     put16(a->data + 4, (uint16_t)sat16((float)s->pos_err));
-    a->data[6] = (uint8_t)s->state | (uint8_t)(s->mode << 4) | (uint8_t)((s->status & SV_ST_STALL) ? 0x80 : 0);
+    a->data[6] = (uint8_t)s->state | (uint8_t)(s->mode << 4) | (uint8_t)(c->unlock_left_ms ? 0x40 : 0) | (uint8_t)((s->status & SV_ST_STALL) ? 0x80 : 0);
     a->data[7] = (uint8_t)s->fault;
 
     b->id = 0x280 + c->node; b->len = 8;
@@ -58,8 +59,8 @@ int can_proto_rx(can_proto_t *c, servo_t *s, const can_frame_t *in, can_frame_t 
         uint32_t val = 0; int st = PS_OK; uint8_t sel = 0;
         if (d[0] == 0x30) {
             uint32_t raw = (uint32_t)d[3] | (uint32_t)d[4] << 8 | (uint32_t)d[5] << 16 | (uint32_t)d[6] << 24;
-            st = params_set(s, c, id, raw);
-            if (st == PS_OK || st == PS_RANGE || st == PS_RUNNING) params_get(s, c, id, &val);   /* what is stored now */
+            st = params_set_locked(s, c, id, raw);
+            if (st == PS_OK || st == PS_RANGE || st == PS_RUNNING || st == PS_LOCKED) params_get(s, c, id, &val);   /* what is stored now */
         } else if (d[0] == 0x31) {
             st = params_get(s, c, id, &val);
         } else if (d[0] == 0x32) {
@@ -83,10 +84,24 @@ int can_proto_rx(can_proto_t *c, servo_t *s, const can_frame_t *in, can_frame_t 
     case 0x35: {
         uint8_t blob[192];
         size_t len = params_save(s, c, blob, sizeof blob);
-        if (!c->save_cb) status = PS_UNAVAIL;
+        if (!params_unlocked(c)) status = PS_LOCKED;
+        else if (!c->save_cb) status = PS_UNAVAIL;
         else if (len == 0 || c->save_cb(blob, (uint16_t)len) != 0) status = 1;
+        else c->unlock_left_ms = c->unlock_ms;
         break; }
-    case 0x36: status = params_defaults(s, c); break;
+    case 0x36:
+        if (!params_unlocked(c)) status = PS_LOCKED;
+        else { status = params_defaults(s, c); if (status == PS_OK) c->unlock_left_ms = c->unlock_ms; }
+        break;
+    case 0x50: {
+        uint32_t key = in->len >= 5 ? ((uint32_t)d[1] | (uint32_t)d[2] << 8 | (uint32_t)d[3] << 16 | (uint32_t)d[4] << 24) : 0;
+        if (in->len < 5 || key != SV_UNLOCK_KEY) status = PS_BAD_ARG;
+        else if (!params_unlocked(c)) status = PS_LOCKED;
+        else if (s->state != SV_OFF && s->state != SV_FAULT) status = PS_RUNNING;
+        else if (!c->boot_cb) status = PS_UNAVAIL;
+        else { out[n].id = 0x080 + c->node; out[n].len = 2; out[n].data[0] = d[0]; out[n].data[1] = 0; n++;
+               c->boot_cb(); return n; }          /* the reply goes out first; on the MCU the callback resets */
+        break; }
     case 0x40: can_proto_telemetry(c, s, &out[0], &out[1]); n = 2; break;
     case 0x7F: servo_clear_fault(s); break;
     default: status = 2; break;
@@ -101,6 +116,7 @@ int can_proto_rx(can_proto_t *c, servo_t *s, const can_frame_t *in, can_frame_t 
 
 int can_proto_tick_ms(can_proto_t *c, const servo_t *s, can_frame_t *out)
 {
+    if (c->unlock_left_ms) c->unlock_left_ms--;
     if (c->stream_ms == 0) return 0;
     if (c->countdown_ms > 1) { c->countdown_ms--; return 0; }
     c->countdown_ms = c->stream_ms;

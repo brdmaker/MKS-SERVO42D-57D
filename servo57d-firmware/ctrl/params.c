@@ -12,6 +12,9 @@ static const param_def_t table[] = {
     /* identity */
     { 0x0001, "fw_version",   "",     PT_I32, 0, S(fw_version), 0, 0, PF_RO },
     { 0x0002, "board_id",     "",     PT_I32, 0, S(board_id),   0, 0, PF_RO },
+    /* write lock: reads the ms left (0 = closed); writing the key opens it, anything else closes it */
+    { 0x0003, "write_lock",   "ms",   PT_I32, 1, C(unlock_left_ms), 0, 0, PF_OPEN },
+    { 0x0004, "unlock_ms",    "ms",   PT_I32, 1, C(unlock_ms),  1000, 600000, PF_PERSIST },
     /* state and measurements */
     { 0x0100, "state",        "",     PT_I32, 0, S(state),      0, 0, PF_RO },
     { 0x0101, "fault",        "bits", PT_I32, 0, S(fault),      0, 0, PF_RO },
@@ -32,11 +35,11 @@ static const param_def_t table[] = {
     { 0x0110, "enc_dir",      "",     PT_I32, 0, S(enc_dir),    0, 0, PF_RO },
     { 0x0111, "iq_ref",       "A",    PT_F32, 0, S(iq_ref),     0, 0, PF_RO },
     /* commands (the same as the command frames) */
-    { 0x0200, "mode",         "",     PT_I32, 0, S(mode),       0, 2, 0 },
-    { 0x0201, "cmd_iq",       "A",    PT_F32, 0, S(cmd_iq),     -FS, FS, 0 },
-    { 0x0202, "cmd_vel",      "rad/s",PT_F32, 0, S(cmd_vel),    -1000, 1000, 0 },
-    { 0x0203, "cmd_pos",      "cnt",  PT_I32, 0, S(cmd_pos),    -2e9f, 2e9f, 0 },
-    { 0x0204, "ilim",         "A",    PT_F32, 0, S(ilim),       0, FS, 0 },
+    { 0x0200, "mode",         "",     PT_I32, 0, S(mode),       0, 2, PF_OPEN },
+    { 0x0201, "cmd_iq",       "A",    PT_F32, 0, S(cmd_iq),     -FS, FS, PF_OPEN },
+    { 0x0202, "cmd_vel",      "rad/s",PT_F32, 0, S(cmd_vel),    -1000, 1000, PF_OPEN },
+    { 0x0203, "cmd_pos",      "cnt",  PT_I32, 0, S(cmd_pos),    -2e9f, 2e9f, PF_OPEN },
+    { 0x0204, "ilim",         "A",    PT_F32, 0, S(ilim),       0, FS, PF_OPEN },
     /* configuration: saved */
     { 0x0300, "motor_r",      "ohm",  PT_F32, 0, SC(r_ohm),     0.05f, 50.0f, PF_OFF_ONLY | PF_PERSIST },
     { 0x0301, "motor_l",      "H",    PT_F32, 0, SC(l_h),       1e-5f, 0.1f,  PF_OFF_ONLY | PF_PERSIST },
@@ -57,7 +60,7 @@ static const param_def_t table[] = {
     { 0x0310, "detent_phase", "rad",  PT_F32, 0, SC(detent_phase), -7, 7,     PF_PERSIST },
     /* CAN */
     { 0x0400, "can_node",     "",     PT_U8,  1, C(node),       1, 127,       PF_PERSIST },
-    { 0x0401, "stream_ms",    "ms",   PT_U16, 1, C(stream_ms),  0, 60000,     PF_PERSIST },
+    { 0x0401, "stream_ms",    "ms",   PT_U16, 1, C(stream_ms),  0, 60000,     PF_OPEN },      /* runtime, like command 0x21: not part of the saved set */
 };
 #define NPARAM ((int)(sizeof table / sizeof table[0]))
 
@@ -100,6 +103,10 @@ int params_set(servo_t *s, can_proto_t *c, uint16_t id, uint32_t raw)
     const param_def_t *d = params_find(id);
     if (!d) return PS_UNKNOWN;
     if (d->flags & PF_RO) return PS_READ_ONLY;
+    if (id == PID_WRITE_LOCK) {                          /* the lock register: no range, no side effects but the lock */
+        c->unlock_left_ms = (raw == SV_UNLOCK_KEY) ? c->unlock_ms : 0;
+        return PS_OK;
+    }
     if ((d->flags & PF_OFF_ONLY) && !is_off(s)) return PS_RUNNING;
     double v;
     if (d->type == PT_F32) {
@@ -133,6 +140,20 @@ int params_set(servo_t *s, can_proto_t *c, uint16_t id, uint32_t raw)
     default: break;
     }
     return PS_OK;
+}
+
+bool params_unlocked(const can_proto_t *c) { return c->unlock_left_ms > 0; }
+
+int params_set_locked(servo_t *s, can_proto_t *c, uint16_t id, uint32_t raw)
+{
+    const param_def_t *d = params_find(id);
+    if (!d) return PS_UNKNOWN;
+    if (d->flags & PF_RO) return PS_READ_ONLY;
+    bool open = (d->flags & PF_OPEN) != 0;               /* includes the lock register */
+    if (!open && !params_unlocked(c)) return PS_LOCKED;
+    int st = params_set(s, c, id, raw);
+    if (st == PS_OK && !open) c->unlock_left_ms = c->unlock_ms;     /* an accepted write keeps it open */
+    return st;
 }
 
 int params_defaults(servo_t *s, can_proto_t *c)

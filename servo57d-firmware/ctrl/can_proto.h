@@ -22,13 +22,20 @@
  *   0x33 parameter at  index u16 (0xFFFF: count) -> reply value = id (or the count)
  *   0x35 save          store the saved set (PF_PERSIST) through the flash callback
  *   0x36 defaults      restore the configuration defaults (drive off)
+ *   0x50 enter boot    key u32             drive off and write lock open; calls boot_cb (restarts
+ *                                              into the bootloader for a CAN firmware update)
  *   0x40 read once     (sends telemetry A and B)
  *   0x7F clear fault
  * Telemetry A/B are only sent on 0x21 or 0x40, never unasked.
+ * Write lock: 0x30 (settings), 0x35, 0x36 and 0x50 answer status 7 until parameter 0x0003
+ * (`write_lock`) has been written with SV_UNLOCK_KEY (params.h); the runtime commands (enable,
+ * mode, torque / velocity / position, current limit, stream, clear fault) stay open. It closes
+ * `unlock_ms` after the last accepted write, or when anything else is written to it. Bit 6 of the
+ * state byte of telemetry A shows that it is open.
  * Values: PT_F32 is the IEEE float, PT_I32 an int32, PT_U16 / PT_U8 are zero-extended.
  * Parameter ids, types, ranges, units and flags: params.c, docs/can_params.md.
  * Status: 0 ok, 1 bad argument, 2 unknown, 3 read-only, 4 out of range,
- *         5 not while running, 6 no flash store. */
+ *         5 not while running, 6 no flash store, 7 write lock closed. */
 #ifndef CAN_PROTO_H
 #define CAN_PROTO_H
 #include <stdint.h>
@@ -40,6 +47,9 @@ typedef struct can_proto {
     uint8_t  node;
     uint16_t stream_ms;
     uint16_t countdown_ms;
+    uint32_t unlock_ms;            /* how long the write lock stays open after the last write */
+    uint32_t unlock_left_ms;       /* 0: closed */
+    int (*boot_cb)(void);          /* enter the bootloader; NULL: not available */
     /* called by the save command with the blob to store; returns 0 on success.
      * NULL: the drive answers status 6. Set by the MCU glue (flash) or the simulator. */
     int (*save_cb)(const uint8_t *blob, uint16_t len);
