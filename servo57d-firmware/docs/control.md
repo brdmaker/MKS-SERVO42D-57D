@@ -3,7 +3,7 @@
 `ctrl/` is a closed-loop stepper controller with force feedback over CAN. It is plain C with
 float, no register access and no stmbl dependencies, so the same files run on the
 Cortex-M4F and in `sim/`, a model of the whole drive (motor, bridges, shunt amplifier, ADC,
-encoder, CAN), built for either board: `make -C sim check` runs 493 checks for each, SERVO57D
+encoder, CAN), built for either board: `make -C sim check` runs 546 checks for each, SERVO57D
 (NEMA23) and SERVO42D (NEMA17), in about 50 s. The board is a build flag, `-DSV_BOARD_57D` or
 `-DSV_BOARD_42D`, which picks `ctrl/servo_hw_57d.h` or `servo_hw_42d.h` (shunt value, divider,
 sense signs) and `sim/sim_board.h` (motor and gains of the virtual drive); see `hardware_42d.md`.
@@ -70,6 +70,7 @@ Every setting and every measured value is a parameter with a fixed id, type, ran
 - **Drive off only:** motor R, L, pole pairs, current-loop bandwidth and the align current can only change while the drive is off or faulted (status 5 otherwise). Changing R, L or the bandwidth recomputes the current-loop PI gains.
 - **Saved set:** `params_save` serialises the 19 saved parameters (120 bytes with a header and CRC-16); `params_load` applies a blob only if the CRC and the length are right and the drive is off, and skips values out of range. Writing the blob to flash is the MCU glue's job (`can_proto_t.save_cb`); without it the save command answers status 6. The simulator stores it in RAM and checks the round trip across a restart.
 - **Write lock:** at power-up the drive is locked. Settings (`0x30` on any parameter that is not a runtime command), save (`0x35`), defaults (`0x36`) and the enter-bootloader command (`0x50`) answer status 7 until the lock register (parameter `0x0003`, `write_lock`) is written with the key `0xA5C3E10F` (`SV_UNLOCK_KEY`). Any other value written there closes it again. It also closes by itself `unlock_ms` (default 10 s, parameter `0x0004`) after the last accepted write, and bit 6 of the state byte in telemetry A shows that it is open. The runtime commands (enable, mode, torque / velocity / position, current limit, stream, clear fault) stay open, since normal operation must not need the key. 60000 random frames, half of them set commands for real parameter ids with in-range values, change nothing in the saved set while the lock is closed (4063 runtime-command writes are accepted), and 16249 are accepted with it held open: the control run shows the test frames are strong enough to matter. The lock is protection against stray frames and host bugs, not a security feature: the key is a constant.
+- **Entering the bootloader:** command `0x50` (key, write lock open, drive off) restarts into the bootloader for a CAN firmware update, see `can_update.md`.
 - **Not parameters:** the CAN bit rate is a hardware setting and is not on this list yet.
 
 Telemetry is sent only on request (`0x40`) or at the period set by `0x21`. It is a different protocol
@@ -126,6 +127,10 @@ speed charges the bus on a real board), temperature, FET switching edges, and th
 interrupt-latency jitter of the real MCU. The motor numbers are typical catalogue values,
 not measured, and the FET on-resistance of the 42D (AP4008QD) is an assumption. A passing run here shows the algorithm and the wiring assumptions are
 consistent; it does not show the board works.
+
+## Firmware update over CAN
+
+`ctrl/fwup.[ch]` is the logic of a CAN bootloader (image format, chunked transfer with per-chunk CRC, staging, a power-fail-safe apply, boot decision), tested in `sim/sim_fwup.c` on a flash model that loses power inside any erase or write: 405 cuts during a transfer never touched the application, 186 cuts during the copy (half of them twice) all ended on a complete new image. `tools/mkfwimage.py` builds the image. The bootloader program itself is not written; see `can_update.md`.
 
 ## Not done: the MCU glue
 

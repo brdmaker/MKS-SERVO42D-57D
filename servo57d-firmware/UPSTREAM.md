@@ -14,4 +14,5 @@ licence GPL-3.0 (`LICENSE`). Third-party firmware for the MKS SERVO57D
   estimate, CAN protocol, MT6816 frame decoder) for the SERVO57D and SERVO42D
   (`-DSV_BOARD_42D`). Not yet called from `src/`.
 - `sim/`: host simulator and regression tests for `ctrl/`, both boards.
+- `tools/mkfwimage.py`: builds the CAN update image.
 - `docs/`: hardware notes read from the schematics (57D, 42D), design notes of the control core.
