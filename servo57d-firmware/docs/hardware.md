@@ -22,7 +22,7 @@ need a bench check before the firmware relies on them.
 | CAN | TJA1051T/3 (U15), ESD diode, SW1 (apparently the 120 ohm termination, not traced) | |
 | inputs / outputs | opto-isolators U3 (Stp, Dir, En) and U21 (M_IN1/2, M_OUT1/2) | |
 | user interface | OLED connector, three keys, LED | |
-| debug | SWD header J3 (SWDIO, SWCLK, 3V3, GND) | |
+| debug | SWD header J4: 3V3, GND, SWCLK, SWDIO (pins 1..4), see `programmer_pinout.png` | |
 
 ## MCU pins
 

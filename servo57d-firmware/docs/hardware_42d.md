@@ -41,6 +41,6 @@ the same N32L40x family, so it probably shares it (**verify**).
   (`SV_I_FULLSCALE`), so a trip level above the sensing range cannot be configured.
 - The sense signal per amp is 2.5 times larger than on the 57D, so a 1.5 A motor uses more of the ADC
   range and resolves 2.4 mA per count.
-- The SWD pins are also keys: a debugger on J5 and the Menu / Next keys fight over PA13 / PA14.
+- The SWD pins are also keys: a debugger on J5 and the Menu / Next keys fight over PA13 / PA14. Pinout of J5 (and the 57D's J4): `programmer_pinout.png`.
 - The motor is a NEMA17: lower inertia and torque, a larger detent in proportion. The simulated
   defaults are in `sim/sim_board.h`; the FET on-resistance there is an assumption.
