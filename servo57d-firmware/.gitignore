@@ -61,3 +61,7 @@ build/.ninja_log
 build/.ninja_deps
 /build
 /fw_version.h
+
+# simulator
+sim/sim_test
+sim/trace.csv

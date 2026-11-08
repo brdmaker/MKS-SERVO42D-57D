@@ -1,0 +1,114 @@
+# Control core and virtual drive
+
+`ctrl/` is a closed-loop stepper controller with force feedback over CAN. It is plain C with
+float, no register access and no stmbl dependencies, so the same files run on the
+Cortex-M4F and in `sim/`, a model of the whole drive (motor, bridges, shunt amplifier, ADC,
+encoder, CAN). `make -C sim check` runs 113 checks in about 12 s.
+
+![simulated run](sim_demo.png)
+
+The plot is `./sim_test --demo trace.csv` plotted: two position steps, a load ramp to
++-1.2 Nm and back, then a velocity run. The red trace is the force feedback the drive
+sends over CAN.
+
+## What the core does
+
+Rates: current loop 20 kHz (one PWM period), velocity and position 2 kHz.
+
+1. **Calibrate (`SV_CAL`).** All legs at 50 %, so no coil voltage. Averages 128 samples of
+   each current channel to get the zero-current offsets. It waits for the shaft to stand
+   still (a moving rotor would put back-EMF current into the offsets); 3 s without a
+   standstill is a fault.
+2. **Align and find direction (`SV_ALIGN`, `SV_PHASE_DIR`).** A current vector at electrical
+   angle 0, then at +90 degrees. Averages the encoder at both, which gives the electrical
+   offset and whether the encoder counts with or against positive torque.
+   A shaft that does not move by about a quarter of an electrical period is a
+   `SV_FLT_PHASING` fault. `raw * pole_pairs mod 16384` is the exact electrical angle.
+3. **Run (`SV_RUN`).** Field-oriented: the coil currents are projected on the rotor flux axis
+   (`id`, `iq`). `id = 0`, `iq` is the torque current. The PI controllers are tuned by
+   pole-zero cancellation from the configured `R`, `L` and bandwidth (1 kHz), with
+   decoupling and back-EMF feed-forward. A cascade velocity PI and position P produce `iq`.
+   The encoder angle is advanced by 1.5 sampling periods (the SPI value is one period old
+   and the PWM update lands half a period after the sample).
+4. **Force estimate.** `torque_nm = Kt * (iq - detent feed-forward)`, low-passed at 200 Hz.
+   With `detent_nm = 0` it contains the detent ripple.
+5. **Protection.** Overcurrent (`i_trip`), supply under / over voltage, No_Mag, encoder parity
+   streak. A fault puts all legs low (brake). Stall (current at the limit with a position
+   error over 200 counts for 0.2 s) is a status flag, not a fault.
+
+Size on the M4F (`-Os`, hard float): about 3.4 kB flash for the three files plus `sinf`, `cosf`
+and `sqrtf` from the library, and 264 bytes of RAM for the state.
+
+## CAN protocol
+
+Defined in `ctrl/can_proto.h` (11-bit IDs, little endian, node id `n`):
+
+| frame | ID | content |
+|---|---|---|
+| command | `0x100+n` | enable, mode, torque / velocity / position target, current limit, stream period, gains, read once, clear fault |
+| reply | `0x080+n` | command code, status (0 ok, 1 bad argument, 2 unknown) |
+| telemetry A | `0x180+n` | position (counts, multi-turn), position error, state / mode / stall, fault bits |
+| telemetry B | `0x280+n` | **iq (mA), torque (mNm)**, speed (0.1 rpm), supply (10 mV) |
+
+Telemetry is sent only on request (`0x40`) or at the period set by `0x21`. It is a different protocol
+from MakerBase's (frame layout and command codes); the stock manual's commands are not
+implemented.
+
+## Results on the virtual drive
+
+Default motor: 0.9 ohm, 3.5 mH, Kt 0.45 Nm/A, 50 pole pairs, J 5e-5 kg m^2, 0.05 Nm detent,
+24 V supply, 3 A limit (1.35 Nm). Numbers from `make -C sim check`:
+
+| test | result |
+|---|---|
+| offset calibration | offsets within 0.1 LSB of the model's; waits 34 ms for a shaft still rolling into a detent |
+| phasing | flux angle error under 0.3 degrees, from 3 start angles and both magnet orientations |
+| current step (rotor blocked) | 10–90 % rise 360 us, 0.4 % overshoot, 1 % low (the model's amplifier gain error is not calibrated out) |
+| position steps | 2000 / 5000 / 16384 counts settle within +-8 counts in 45 / 121 / 234 ms, 0 counts final error |
+| velocity | 120 rpm to within 0.1 %, reverse too |
+| **force feedback** | CAN torque within 0.011 Nm of the applied load from -1.1 to +1.1 Nm; position error 0 counts under load |
+| overload (1.6 Nm over the 1.35 Nm limit) | stall flag, torque telemetry saturates at 1.35 Nm, steps lost are recovered when the load is removed |
+| motor parameters wrong | R +50 % / L -40 %, R -33 % / L +50 %: position error 0, torque correct. Kt +20 %: torque reads 20 % high, as it must |
+| no detent compensation | hunts +-30 counts at standstill, torque estimate 9 % low at 0.5 Nm |
+| faults | undervoltage, parity streak, No_Mag and blocked shaft trip; two parity glitches are ignored; fault clears over CAN |
+
+What the simulator found while it was being built (all fixed in the core): calibration run
+while the shaft was still moving put 16 LSB (0.1 A) of error on one channel; position
+gains that looked reasonable stuck against the 0.05 Nm detent and hunted; an overload test
+with a constant torque load accelerates the rotor without limit, so the test needs a speed-
+dependent load.
+
+## What the simulator models, and what it does not
+
+Modelled at 62.5 ns steps: the center-aligned TIM3 compare with the update at the valley, the
+EG3013 dead time and body diode conduction, FET on resistance, the shunt seeing the
+current only while its leg's low FET conducts, the amplifier's settling and offsets and
+the gain error, ADC clock, sampling and conversion time per channel, ADC noise, the
+MT6816 SPI frame with parity and No_Mag and a one-period-old angle, the motor (two coils, back-
+EMF, detent, viscous friction, inertia, external load), and the CAN mailboxes at 1 ms.
+
+Not modelled: iron losses and saturation, coil mutual coupling, CAN bit timing and
+arbitration, supply sag and regeneration into the supply (a motor decelerating from
+speed charges the bus on a real board), temperature, FET switching edges, and the
+interrupt-latency jitter of the real MCU. The motor numbers are typical for a 57 mm motor,
+not measured. A passing run here shows the algorithm and the wiring assumptions are
+consistent; it does not show the board works.
+
+## Not done: the MCU glue
+
+`ctrl/` is not called from `src/` yet. To run on the board it needs, in `src/drivers/`:
+
+1. TIM3 center-aligned at 20 kHz, `phase*` pins as TIM3 PWM outputs, compare registers
+   loaded at the valley, and an ISR (or ADC end-of-conversion) at the peak.
+2. The ADC triggered from TIM3 (or clocked fast enough) so that both current samples
+   land in the low-on window, see `hardware.md`.
+3. The MT6816 read each period (`mt6816_request()` / `mt6816_decode()`).
+4. CAN receive and the 1 ms tick feeding `can_proto_rx` / `can_proto_tick_ms`.
+5. `-mfpu=fpv4-sp-d16 -mfloat-abi=hard` in `CMakeLists.txt` (it builds soft-float now) and
+   `-lm`.
+6. A first bench step before any motor: check the sense signs and offsets with the motor
+   disconnected, then spin it open loop at low current.
+
+Open items for a real motor: `r_ohm`, `l_h`, `kt`, `pole_pairs`, and the detent amplitude
+and phase (`detent_nm`, `detent_phase`) must be measured or identified; the velocity and
+position gains in `sim_default_cfg()` are tuned for the simulated motor and load.

@@ -22,7 +22,7 @@ extern "C" {
 #define BTN1_PIN    GPIO_PIN_9 /* Menu */
 #define BTN2_PIN    GPIO_PIN_8 /* Enter */
 #define BTN3_PORT   GPIOA
-#define BTN3_PIN    GPIO_PIN_3 /* Next */
+#define BTN3_PIN    GPIO_PIN_15 /* Next (schematic: KEY_NEXT = PA15; was PA3, the supply divider) */
 
 /* Externals */
 
@@ -64,14 +64,18 @@ extern "C" {
 #define CAN_TX_PIN         GPIO_PIN_12
 #define CAN_RX_PIN         GPIO_PIN_11
 
-/* Current ADC */
+/* Current ADC. Shunt 0.02 ohm in the low side of leg A+ (coil A) and leg B-
+ * (coil B), difference amplifier gain 6.65 around vREF = 1.65 V; PA3 is the
+ * supply through a 15.4k / 1k divider. See docs/hardware.md. */
 
 #define ADC_CURRENT_A       ADC_CH_3_PA2
 #define ADC_CURRENT_B       ADC_CH_2_PA1
 #define ADC_VBUS            ADC_CH_4_PA3
 #define ADC_DMA_Channel     DMA_CH1
 
-/* Stepper drivers */
+/* Stepper drivers: four EG3013 half-bridges, HIN and LIN of each tied
+ * together = one PWM input per leg (1: high FET on, 0: low FET on, 120 ns
+ * dead time in the driver). TIM3 CH1..CH4. Coil A = A1/A2, coil B = B1/B2. */
 
 #define PHASE_A_PORT        GPIOA
 #define PHASE_A1_PIN        GPIO_PIN_6
