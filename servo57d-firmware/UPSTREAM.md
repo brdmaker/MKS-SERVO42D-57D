@@ -11,6 +11,7 @@ licence GPL-3.0 (`LICENSE`). Third-party firmware for the MKS SERVO57D
   divider input); the schematic has `KEY_NEXT` on PA15 and `buttons_tick()` already
   reads bit 15. Comments on the current sensing and the gate drive.
 - `ctrl/`: portable control core (current loop, velocity / position loops, force
-  estimate, CAN protocol, MT6816 frame decoder). Not yet called from `src/`.
-- `sim/`: host simulator and regression tests for `ctrl/`.
-- `docs/`: hardware notes read from the schematic, design notes of the control core.
+  estimate, CAN protocol, MT6816 frame decoder) for the SERVO57D and SERVO42D
+  (`-DSV_BOARD_42D`). Not yet called from `src/`.
+- `sim/`: host simulator and regression tests for `ctrl/`, both boards.
+- `docs/`: hardware notes read from the schematics (57D, 42D), design notes of the control core.

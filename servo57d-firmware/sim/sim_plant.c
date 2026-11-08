@@ -1,4 +1,5 @@
 #include "sim_plant.h"
+#include "sim_board.h"
 #include "../ctrl/mt6816_proto.h"
 #include <math.h>
 #include <string.h>
@@ -15,9 +16,9 @@ static float gauss(sim_t *s) { return 0.5f * (rnd(s) + rnd(s) + rnd(s) + rnd(s))
 void sim_default_motor(sim_motor_t *m)
 {
     memset(m, 0, sizeof *m);
-    /* NEMA23-class 1.8 deg stepper, 3 A: values typical of a 57 mm / 2 Nm motor */
-    m->r = 0.9f; m->l = 3.5e-3f; m->kt = 0.45f; m->pp = 50;
-    m->j = 5.0e-5f; m->b = 3.0e-3f; m->tdet = 0.05f;
+    /* 1.8 degree hybrid stepper, typical catalogue values for the board's motor size */
+    m->r = SIM_M_R; m->l = SIM_M_L; m->kt = SIM_M_KT; m->pp = 50;
+    m->j = SIM_M_J; m->b = SIM_M_B; m->tdet = SIM_M_TDET;
     m->enc_sign = 1;
     m->th = 0.37;                    /* arbitrary start angle */
 }
@@ -25,7 +26,7 @@ void sim_default_motor(sim_motor_t *m)
 void sim_default_hw(sim_hw_t *h)
 {
     memset(h, 0, sizeof *h);
-    h->vin = 24.0f; h->rds = 0.006f; h->vf = 0.7f;
+    h->vin = 24.0f; h->rds = SIM_RDS; h->vf = 0.7f;
     h->amp_tau = 1.0e-6f;
     h->amp_vos_a = 0.012f; h->amp_vos_b = -0.009f;   /* offsets the calibration must remove */
     h->amp_gain_err = 0.01f;
@@ -37,16 +38,16 @@ void sim_default_hw(sim_hw_t *h)
 
 void sim_default_cfg(servo_cfg_t *c)
 {
-    c->r_ohm = 0.9f; c->l_h = 3.5e-3f; c->kt = 0.45f; c->pole_pairs = 50;
-    c->i_max = 3.0f; c->i_align = 2.0f;
+    c->r_ohm = SIM_M_R; c->l_h = SIM_M_L; c->kt = SIM_M_KT; c->pole_pairs = 50;
+    c->i_max = SIM_I_MAX; c->i_align = SIM_I_ALIGN;
     c->cur_bw_hz = 1000.0f;
     c->pos_kp = 100.0f;
-    c->vel_kp = 0.07f; c->vel_ki = 5.0f;
+    c->vel_kp = SIM_VEL_KP; c->vel_ki = SIM_VEL_KI;
     c->vel_max = 60.0f;                              /* ~570 rpm */
     c->vbus_min = 10.0f; c->vbus_max = 30.0f;
-    c->i_trip = 6.5f;
+    c->i_trip = SIM_I_TRIP;
     c->torque_lpf_hz = 200.0f;
-    c->detent_nm = 0.05f; c->detent_phase = 0.0f;     /* matches the model; a real motor needs identifying */
+    c->detent_nm = SIM_M_TDET; c->detent_phase = 0.0f;     /* matches the model; a real motor needs identifying */
 }
 
 void sim_init(sim_t *s)

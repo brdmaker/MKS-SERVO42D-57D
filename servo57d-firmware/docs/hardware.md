@@ -1,5 +1,7 @@
 # MKS SERVO57D hardware, read from the schematic
 
+The SERVO42D has the same topology with a 0.05 ohm shunt; see `hardware_42d.md`.
+
 Source: `Hardware/MKS SERVO57D_CAN V1.1_001 Schematic.pdf` (the same sheet is in
 `Doc/`), the EG3013 and MT6816 datasheets in `Doc/`, and the pin map in
 `include/board.h`. Nothing here is measured on a board. Items marked **verify**

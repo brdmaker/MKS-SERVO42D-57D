@@ -3,13 +3,18 @@
 `ctrl/` is a closed-loop stepper controller with force feedback over CAN. It is plain C with
 float, no register access and no stmbl dependencies, so the same files run on the
 Cortex-M4F and in `sim/`, a model of the whole drive (motor, bridges, shunt amplifier, ADC,
-encoder, CAN). `make -C sim check` runs 113 checks in about 12 s.
+encoder, CAN), built for either board: `make -C sim check` runs 114 checks for each, SERVO57D
+(NEMA23) and SERVO42D (NEMA17), in about 25 s. The board is a build flag, `-DSV_BOARD_57D` or
+`-DSV_BOARD_42D`, which picks `ctrl/servo_hw_57d.h` or `servo_hw_42d.h` (shunt value, divider,
+sense signs) and `sim/sim_board.h` (motor and gains of the virtual drive); see `hardware_42d.md`.
 
-![simulated run](sim_demo.png)
+| SERVO57D | SERVO42D |
+|---|---|
+| ![57D run](sim_demo_57d.png) | ![42D run](sim_demo_42d.png) |
 
-The plot is `./sim_test --demo trace.csv` plotted: two position steps, a load ramp to
-+-1.2 Nm and back, then a velocity run. The red trace is the force feedback the drive
-sends over CAN.
+The plots are `make trace_57d.csv trace_42d.csv` plotted: two position steps, a load ramp to
+89 % of the drive's torque limit and back, then a velocity run. The red trace is the force
+feedback the drive sends over CAN.
 
 ## What the core does
 
@@ -56,21 +61,29 @@ implemented.
 
 ## Results on the virtual drive
 
-Default motor: 0.9 ohm, 3.5 mH, Kt 0.45 Nm/A, 50 pole pairs, J 5e-5 kg m^2, 0.05 Nm detent,
-24 V supply, 3 A limit (1.35 Nm). Numbers from `make -C sim check`:
+Virtual motors, both 24 V, 50 pole pairs:
 
-| test | result |
-|---|---|
-| offset calibration | offsets within 0.1 LSB of the model's; waits 34 ms for a shaft still rolling into a detent |
-| phasing | flux angle error under 0.3 degrees, from 3 start angles and both magnet orientations |
-| current step (rotor blocked) | 10–90 % rise 360 us, 0.4 % overshoot, 1 % low (the model's amplifier gain error is not calibrated out) |
-| position steps | 2000 / 5000 / 16384 counts settle within +-8 counts in 45 / 121 / 234 ms, 0 counts final error |
-| velocity | 120 rpm to within 0.1 %, reverse too |
-| **force feedback** | CAN torque within 0.011 Nm of the applied load from -1.1 to +1.1 Nm; position error 0 counts under load |
-| overload (1.6 Nm over the 1.35 Nm limit) | stall flag, torque telemetry saturates at 1.35 Nm, steps lost are recovered when the load is removed |
-| motor parameters wrong | R +50 % / L -40 %, R -33 % / L +50 %: position error 0, torque correct. Kt +20 %: torque reads 20 % high, as it must |
-| no detent compensation | hunts +-30 counts at standstill, torque estimate 9 % low at 0.5 Nm |
-| faults | undervoltage, parity streak, No_Mag and blocked shaft trip; two parity glitches are ignored; fault clears over CAN |
+| | SERVO57D (NEMA23) | SERVO42D (NEMA17) |
+|---|---|---|
+| coil | 0.9 ohm, 3.5 mH | 1.6 ohm, 3.0 mH |
+| Kt, detent | 0.45 Nm/A, 0.05 Nm | 0.21 Nm/A, 0.02 Nm |
+| inertia | 5e-5 kg m^2 | 5.4e-6 kg m^2 |
+| current limit, torque limit | 3 A, 1.35 Nm | 2 A, 0.42 Nm |
+
+Numbers from `make -C sim check`:
+
+| test | SERVO57D | SERVO42D |
+|---|---|---|
+| offset calibration | within 0.1 LSB; waits 34 ms for a shaft still rolling into a detent | within 0.2 LSB; waits 16 ms |
+| phasing | flux angle error under 0.3 degrees, 3 start angles, both magnet orientations | under 0.1 degrees |
+| current step (rotor blocked), 2/3 of the limit | 10–90 % rise 360 us, 0.4 % overshoot, 1 % low | 320 us, 0.7 %, 1 % low |
+| position steps 2000 / 5000 / 16384 counts | settle (+-8 counts) in 45 / 121 / 234 ms, 0 counts final error | 53 / 69 / 143 ms, 0 to 1 count |
+| velocity 120 rpm | within 0.1 %, reverse too | within 0.1 % |
+| **force feedback over CAN** | within 0.011 Nm of the load over +-1.1 Nm (81 % of the limit) | within 0.004 Nm over +-0.34 Nm (81 %) |
+| overload (118 % of the limit) | stall flag, torque telemetry saturates at the limit, lost steps recovered when the load goes | same |
+| motor parameters wrong | R +50 % / L -40 %, R -33 % / L +50 %: position error 0, torque correct; Kt +20 %: torque reads 20 % high | same |
+| no detent compensation | hunts about +-30 counts, torque 9 % low at 37 % of the limit | hunts +-55 counts (the NEMA17's detent is a larger share of its torque), torque 8 % high |
+| faults | undervoltage, parity streak, No_Mag, blocked shaft trip; two parity glitches ignored; clears over CAN | same; the trip level is clamped to 90 % of the sensing range |
 
 What the simulator found while it was being built (all fixed in the core): calibration run
 while the shaft was still moving put 16 LSB (0.1 A) of error on one channel; position
@@ -90,8 +103,8 @@ EMF, detent, viscous friction, inertia, external load), and the CAN mailboxes at
 Not modelled: iron losses and saturation, coil mutual coupling, CAN bit timing and
 arbitration, supply sag and regeneration into the supply (a motor decelerating from
 speed charges the bus on a real board), temperature, FET switching edges, and the
-interrupt-latency jitter of the real MCU. The motor numbers are typical for a 57 mm motor,
-not measured. A passing run here shows the algorithm and the wiring assumptions are
+interrupt-latency jitter of the real MCU. The motor numbers are typical catalogue values,
+not measured, and the FET on-resistance of the 42D (AP4008QD) is an assumption. A passing run here shows the algorithm and the wiring assumptions are
 consistent; it does not show the board works.
 
 ## Not done: the MCU glue
@@ -105,7 +118,7 @@ consistent; it does not show the board works.
 3. The MT6816 read each period (`mt6816_request()` / `mt6816_decode()`).
 4. CAN receive and the 1 ms tick feeding `can_proto_rx` / `can_proto_tick_ms`.
 5. `-mfpu=fpv4-sp-d16 -mfloat-abi=hard` in `CMakeLists.txt` (it builds soft-float now) and
-   `-lm`.
+   `-lm`. For the 42D also the pin map of the N32L403 (`hardware_42d.md`) and its SDK variant.
 6. A first bench step before any motor: check the sense signs and offsets with the motor
    disconnected, then spin it open loop at low current.
 

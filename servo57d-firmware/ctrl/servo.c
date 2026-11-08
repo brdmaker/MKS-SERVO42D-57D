@@ -23,6 +23,8 @@ void servo_init(servo_t *s, const servo_cfg_t *cfg)
 {
     memset(s, 0, sizeof *s);
     s->cfg = *cfg;
+    /* the trip level must lie inside the range the amplifier can show */
+    if (s->cfg.i_trip > 0.9f * SV_I_FULLSCALE) s->cfg.i_trip = 0.9f * SV_I_FULLSCALE;
     s->state = SV_OFF;
     s->mode = SV_MODE_POSITION;
     s->ilim = cfg->i_max;

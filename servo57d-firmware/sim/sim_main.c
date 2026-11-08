@@ -1,6 +1,7 @@
 /* Regression scenarios for the control core on the virtual MKS SERVO57D.
  * `make check` runs them all; `./sim_test --demo trace.csv` writes a trace. */
 #include "sim_plant.h"
+#include "sim_board.h"
 #include "../ctrl/mt6816_proto.h"
 #include <math.h>
 #include <stdio.h>
@@ -11,6 +12,8 @@ static int fails, checks;
 #define CHECK(cond, ...) do { checks++; if (!(cond)) { fails++; printf("  FAIL: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
 #define INFO(...) do { printf("  "); printf(__VA_ARGS__); printf("\n"); } while (0)
 #define TWO_PI 6.283185307179586
+#define TL     ((double)SIM_T_LIM)               /* torque the drive can hold, Nm */
+#define ISTEP  ((double)SIM_I_MAX * 2.0 / 3.0)   /* current step of the loop test, A */
 
 static sim_t S;
 
@@ -152,24 +155,24 @@ static void test_current_step(void)
     cmd_mode(&S, SV_MODE_TORQUE); sim_run(&S, 0.01);
     S.m.locked = true;
     sim_run(&S, 0.02);
-    cmd_torque_ma(&S, 2000);
+    cmd_torque_ma(&S, (int)(ISTEP * 1000));
     sim_run(&S, 0.0005);                                 /* CAN command lands within 1 ms */
     double t10 = -1, t90 = -1, peak = 0, t = 0;
     for (int i = 0; i < 400; i++) {                      /* 40 us steps */
         sim_run(&S, 40e-6); t += 40e-6;
         double iq = S.m.iq_true;
-        if (t10 < 0 && iq >= 0.2) t10 = t;
-        if (t90 < 0 && iq >= 1.8) t90 = t;
+        if (t10 < 0 && iq >= 0.1 * ISTEP) t10 = t;
+        if (t90 < 0 && iq >= 0.9 * ISTEP) t90 = t;
         if (iq > peak) peak = iq;
     }
     sim_run(&S, 0.05);
     double fin = S.m.iq_true;
-    INFO("rise 10-90%% %.0f us, overshoot %.1f%%, final %.3f A (cmd 2.000), measured by the core %.3f A",
-         (t90 - t10) * 1e6, (peak / fin - 1) * 100, fin, S.servo.iq);
+    INFO("rise 10-90%% %.0f us, overshoot %.1f%%, final %.3f A (cmd %.3f), measured by the core %.3f A",
+         (t90 - t10) * 1e6, (peak / fin - 1) * 100, fin, ISTEP, S.servo.iq);
     CHECK(t10 > 0 && t90 > 0, "never reached 90%%");
     CHECK((t90 - t10) > 150e-6 && (t90 - t10) < 700e-6, "rise time %.0f us out of range", (t90 - t10) * 1e6);
     CHECK(peak / fin < 1.15, "overshoot %.1f%%", (peak / fin - 1) * 100);
-    CHECK(fabs(fin - 2.0) < 0.06, "steady error %.3f A", fin - 2.0);
+    CHECK(fabs(fin - ISTEP) < 0.03 * ISTEP, "steady error %.3f A", fin - ISTEP);
     CHECK(S.st.a_invalid + S.st.b_invalid == 0, "invalid shunt samples %llu", (unsigned long long)(S.st.a_invalid + S.st.b_invalid));
 }
 
@@ -222,7 +225,7 @@ static void test_velocity(void)
     INFO("speed %.1f rpm (cmd 120.0), torque estimate %.3f Nm, friction torque %.3f Nm",
          rpm, S.servo.torque_nm, S.m.b * S.m.w);
     CHECK(fabs(rpm - 120.0) < 3.6, "speed %.1f rpm", rpm);
-    CHECK(fabs(S.servo.torque_nm - S.m.b * S.m.w) < 0.05, "torque estimate %.3f", S.servo.torque_nm);
+    CHECK(fabs(S.servo.torque_nm - S.m.b * S.m.w) < 0.037 * TL, "torque estimate %.3f", S.servo.torque_nm);
     cmd_vel(&S, -1200);
     sim_run(&S, 0.8);
     th_a = S.m.th; sim_run(&S, 0.3);
@@ -238,7 +241,9 @@ static void test_force_feedback(void)
     cmd_stream(&S, 10);                                  /* telemetry every 10 ms */
     tlm_t t; memset(&t, 0, sizeof t);
     sim_run(&S, 0.3);
-    float loads[] = { 0.1f, 0.3f, 0.5f, 0.8f, 1.1f, 0.0f, -0.3f, -0.8f, -1.1f };
+    static const float frac[] = { 0.074f, 0.222f, 0.370f, 0.593f, 0.815f, 0.0f, -0.222f, -0.593f, -0.815f };
+    float loads[sizeof frac / sizeof *frac];
+    for (unsigned i = 0; i < sizeof frac / sizeof *frac; i++) loads[i] = (float)(frac[i] * TL);
     double worst = 0;
     for (unsigned i = 0; i < sizeof loads / sizeof *loads; i++) {
         S.m.t_load = loads[i];
@@ -250,23 +255,23 @@ static void test_force_feedback(void)
         INFO("load %+.2f Nm -> CAN torque %+.3f Nm (iq %+d mA), position error %d counts",
              loads[i], rep, t.iq_ma, t.pos_err);
         CHECK(t.have_a && t.have_b, "no telemetry received");
-        CHECK(fabs(err) < 0.07 + 0.05 * fabs(loads[i]), "torque %.3f vs load %.3f", rep, loads[i]);
+        CHECK(fabs(err) < 0.052 * TL + 0.05 * fabs(loads[i]), "torque %.3f vs load %.3f", rep, loads[i]);
         CHECK(abs(t.pos_err) < 6, "position error %d under load", t.pos_err);
         CHECK(t.state == SV_RUN && t.fault == 0 && !t.stall, "state %d fault 0x%x stall %d", t.state, t.fault, t.stall);
     }
-    INFO("worst torque error %.3f Nm over +-1.1 Nm (limit of the drive: %.2f Nm)", worst, S.servo.cfg.i_max * S.servo.cfg.kt);
+    INFO("worst torque error %.3f Nm over +-%.2f Nm (limit of the drive: %.2f Nm)", worst, 0.815 * TL, TL);
     /* beyond the torque limit: stall flag, torque telemetry saturates */
-    S.m.b = 0.05f;                                       /* a loaded shaft: the weight sinks at a finite speed */
-    S.m.t_load = 1.6f;
+    S.m.b = (float)(0.037 * TL);                                       /* a loaded shaft: the weight sinks at a finite speed */
+    S.m.t_load = (float)(1.185 * TL);
     sim_run(&S, 1.0);
     drain(&S, &t);
-    INFO("load 1.6 Nm (over the limit): stall %d, CAN torque %.3f Nm, iq %d mA", t.stall, t.torque_mnm / 1000.0, t.iq_ma);
+    INFO("load %.2f Nm (over the limit): stall %d, CAN torque %.3f Nm, iq %d mA", 1.185 * TL, t.stall, t.torque_mnm / 1000.0, t.iq_ma);
     CHECK(t.stall, "stall flag not set");
     CHECK(t.fault == 0, "stall must not be a fault (0x%x)", t.fault);
     /* remove the overload: the multi-turn count kept the lost steps, the drive returns to the target */
     int32_t tgt = S.servo.cmd_pos;
     INFO("lost %d counts while overloaded", S.servo.pos - tgt);
-    S.m.t_load = 0; S.m.b = 3.0e-3f;
+    S.m.t_load = 0; S.m.b = SIM_M_B;
     sim_run(&S, 2.5);
     drain(&S, &t);
     INFO("overload removed: position error %d counts, stall %d", t.pos_err, t.stall);
@@ -290,11 +295,11 @@ static void test_no_detent_model(void)
         if (e > hi) hi = e;
     }
     INFO("holding error now %d counts, range over 1 s [%.0f, %.0f] counts (0.1 electrical turn = 33 counts)", e0, lo, hi);
-    CHECK(lo > -40 && hi < 40, "hunting %.0f..%.0f counts without detent compensation", lo, hi);
-    S.m.t_load = 0.5f; sim_run(&S, 0.6);
+    CHECK(lo > -SIM_HUNT_LIM && hi < SIM_HUNT_LIM, "hunting %.0f..%.0f counts without detent compensation", lo, hi);
+    S.m.t_load = (float)(0.37 * TL); sim_run(&S, 0.6);
     double tq = S.servo.torque_nm;
-    INFO("0.50 Nm load: torque estimate %.3f Nm", tq);
-    CHECK(fabs(tq - 0.5) < 0.09, "torque estimate %.3f without detent compensation", tq);
+    INFO("%.2f Nm load: torque estimate %.3f Nm", 0.37 * TL, tq);
+    CHECK(fabs(tq - 0.37 * TL) < 0.067 * TL, "torque estimate %.3f without detent compensation", tq);
 }
 
 static void test_param_mismatch(void)
@@ -316,12 +321,12 @@ static void test_param_mismatch(void)
         cmd_pos(&S, S.servo.pos + 4000);
         sim_run(&S, 0.8);
         int err = S.servo.cmd_pos - S.servo.pos;
-        S.m.t_load = 0.6f; sim_run(&S, 0.6);
-        INFO("%s: position error %d counts, 0.60 Nm load reads %.3f Nm, state %d", v[i].what, err, S.servo.torque_nm, S.servo.state);
+        S.m.t_load = (float)(0.444 * TL); sim_run(&S, 0.6);
+        INFO("%s: position error %d counts, %.2f Nm load reads %.3f Nm, state %d", v[i].what, err, 0.444 * TL, S.servo.torque_nm, S.servo.state);
         CHECK(abs(err) <= 4, "%s: position error %d", v[i].what, err);
         CHECK(S.servo.state == SV_RUN, "%s: left RUN (0x%x)", v[i].what, S.servo.fault);
-        double want = 0.6 * v[i].kt;                          /* the estimate scales with the configured Kt */
-        CHECK(fabs(S.servo.torque_nm - want) < 0.05, "%s: torque estimate %.3f, expected %.3f", v[i].what, S.servo.torque_nm, want);
+        double want = 0.444 * TL * v[i].kt;                          /* the estimate scales with the configured Kt */
+        CHECK(fabs(S.servo.torque_nm - want) < 0.037 * TL, "%s: torque estimate %.3f, expected %.3f", v[i].what, S.servo.torque_nm, want);
     }
 }
 
@@ -345,6 +350,9 @@ static void test_commands(void)
     f.len = 3; f.data[0] = 0x20; put_i16(f.data + 1, 9000);          /* limit above i_max */
     can_proto_rx(&S.can, &S.servo, &f, r);
     CHECK(S.servo.ilim <= S.servo.cfg.i_max + 1e-6, "current limit %.2f above the maximum", S.servo.ilim);
+    servo_cfg_t big = S.servo.cfg; servo_t tmp;
+    big.i_trip = 100.0f; servo_init(&tmp, &big);                     /* trip level above the amplifier range */
+    CHECK(tmp.cfg.i_trip <= 0.9f * SV_I_FULLSCALE + 1e-6f, "trip level %.1f A beyond the sensing range %.1f A", tmp.cfg.i_trip, SV_I_FULLSCALE);
     f.len = 6; f.data[0] = 0x30; f.data[1] = 0; float nan = NAN; memcpy(f.data + 2, &nan, 4);
     float before = S.servo.cfg.pos_kp;
     n = can_proto_rx(&S.can, &S.servo, &f, r);
@@ -432,7 +440,7 @@ static void test_speed_limits(void)
     sim_run(&S, 1.0);
     INFO("300 rpm: measured %.0f rpm, coil peak %.2f / %.2f A (limit %.1f A)",
          S.m.w * 60 / TWO_PI, S.st.ia_peak, S.st.ib_peak, S.servo.cfg.i_max);
-    CHECK(S.st.ia_peak < 4.0 && S.st.ib_peak < 4.0, "current peak %.2f A", fmaxf(S.st.ia_peak, S.st.ib_peak));
+    CHECK(S.st.ia_peak < 1.33 * SIM_I_MAX && S.st.ib_peak < 1.33 * SIM_I_MAX, "current peak %.2f A", fmaxf(S.st.ia_peak, S.st.ib_peak));
     CHECK(S.servo.state == SV_RUN, "left RUN (fault 0x%x)", S.servo.fault);
 }
 
@@ -448,8 +456,8 @@ static void demo(const char *path)
     sim_run(&S, 0.2);
     cmd_pos(&S, S.servo.pos + 4000); sim_run(&S, 0.5);
     cmd_pos(&S, S.servo.pos - 2000); sim_run(&S, 0.5);
-    for (int i = 0; i <= 10; i++) { S.m.t_load = 1.2f * i / 10; sim_run(&S, 0.25); }
-    for (int i = 10; i >= -10; i--) { S.m.t_load = 1.2f * i / 10; sim_run(&S, 0.25); }
+    for (int i = 0; i <= 10; i++) { S.m.t_load = (float)(0.89 * TL * i / 10); sim_run(&S, 0.25); }
+    for (int i = 10; i >= -10; i--) { S.m.t_load = (float)(0.89 * TL * i / 10); sim_run(&S, 0.25); }
     S.m.t_load = 0; sim_run(&S, 0.4);
     cmd_mode(&S, SV_MODE_VELOCITY); cmd_vel(&S, 1500); sim_run(&S, 0.8);
     cmd_vel(&S, -1500); sim_run(&S, 1.0);
@@ -459,6 +467,7 @@ static void demo(const char *path)
 int main(int argc, char **argv)
 {
     if (argc > 2 && !strcmp(argv[1], "--demo")) { demo(argv[2]); return 0; }
+    printf("virtual %s: %.1f A max, %.2f Nm, sense %.2f mA/LSB, range +-%.1f A\n\n", SV_BOARD_NAME, SIM_I_MAX, TL, SV_AMPS_PER_LSB * 1000, SV_I_FULLSCALE);
     test_mt6816_codec();
     test_commands();
     test_calibration();
@@ -474,6 +483,6 @@ int main(int argc, char **argv)
     test_speed_limits();
     test_faults();
     test_adc_timing();
-    printf("\n%d checks, %d failed\n", checks, fails);
+    printf("\n%s: %d checks, %d failed\n", SV_BOARD_NAME, checks, fails);
     return fails ? 1 : 0;
 }

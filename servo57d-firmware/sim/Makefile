@@ -1,17 +1,29 @@
-# Host build of the SERVO57D control core against the virtual drive.
+# Host build of the control core against the virtual drive, for both boards.
 CFLAGS ?= -O2 -Wall -Wextra -std=gnu11
 SRC = sim_main.c sim_plant.c ../ctrl/servo.c ../ctrl/can_proto.c ../ctrl/mt6816_proto.c
-HDR = sim_plant.h ../ctrl/servo.h ../ctrl/servo_hw.h ../ctrl/can_proto.h ../ctrl/mt6816_proto.h
+HDR = sim_plant.h sim_board.h ../ctrl/servo.h ../ctrl/servo_hw.h ../ctrl/servo_hw_57d.h \
+      ../ctrl/servo_hw_42d.h ../ctrl/can_proto.h ../ctrl/mt6816_proto.h
 
-sim_test: $(SRC) $(HDR)
-	$(CC) $(CFLAGS) -o $@ $(SRC) -lm
+all: sim_test_57d sim_test_42d
 
-check: sim_test
-	./sim_test
+sim_test_57d: $(SRC) $(HDR)
+	$(CC) $(CFLAGS) -DSV_BOARD_57D -o $@ $(SRC) -lm
+sim_test_42d: $(SRC) $(HDR)
+	$(CC) $(CFLAGS) -DSV_BOARD_42D -o $@ $(SRC) -lm
 
-trace.csv: sim_test
-	./sim_test --demo $@
+check: all
+	./sim_test_57d
+	./sim_test_42d
+
+check-57d: sim_test_57d
+	./sim_test_57d
+check-42d: sim_test_42d
+	./sim_test_42d
+
+# trace for plotting: make trace_42d.csv
+trace_%.csv: sim_test_%
+	./sim_test_$* --demo $@
 
 clean:
-	rm -f sim_test trace.csv
-.PHONY: check clean
+	rm -f sim_test sim_test_57d sim_test_42d trace*.csv
+.PHONY: all check check-57d check-42d clean
