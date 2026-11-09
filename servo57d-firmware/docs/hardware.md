@@ -14,7 +14,7 @@ need a bench check before the firmware relies on them.
 | input | J1 8-pin (V+, GND, Com, En, Stp, Dir, 485_B/CANL, 485_A/CANH), F1 fuse, D1 SS54F, TVS SMF26A | the manual says 12–24 V |
 | 5 V | MP1584 buck (U2) | gate drivers, CAN transceiver |
 | 3.3 V | AMS1117-3.3 (U1) | MCU, encoder, amplifiers |
-| MCU | N32L406CBL7 (U13), 64 MHz, Cortex-M4F, 128 kB flash, 32 kB RAM | `__FPU_PRESENT 1` in the SDK |
+| MCU | N32L406CBL7 (U13), 64 MHz, Cortex-M4F with FPU, 128 kB flash, **24 kB SRAM** | datasheet `Doc/N32L406CBL7.pdf` (text: `.txt`); the upstream linker script says 32 kB, see Other findings |
 | gate drive | 4 × EG3013 half-bridge drivers (U4, U7, U8, U10), 5 V supply, 1 µF bootstrap caps | one driver per leg |
 | power stage | 8 × AP050N03Q 30 V FETs, one per switch | 30 V FETs: keep the supply at or below 24 V |
 | current sense | 0.02 ohm shunts R10 (coil A) and R22 (coil B), GS8632 dual amplifier (U6A/U6B), LM321 vREF buffer (U12) | see below |
@@ -127,6 +127,10 @@ bytes in one chip-select frame, polarity high, second edge, `SPI_BR_PRESCALER_4`
 per turn; the datasheet gives under 2 us delay.
 
 ## Other findings
+
+- **SRAM is 24 kB, not 32 kB.** The datasheet gives 24 KB (16 KB SRAM1 + 8 KB SRAM2, 0x20000000 to 0x20005FFF); the upstream `n32l40x_flash.ld` has `LENGTH = 32K` and `_estack = 0x20008000`, 8 KB above the end of the SRAM. Check what the stack does on a real chip, and use 24 KB in our linker script.
+- **Flash (datasheet table 4-22):** 2 KB pages, word (32-bit) programming at 100 us per word, page erase 2 ms typical and 20 ms at most, whole-chip erase 100 ms, 100000 erase cycles.
+- **ROM bootloader:** in system memory (0x1FFF0000), programs the flash over USART1 or USB, not CAN. The boot source is chosen by the BOOT0 pin and the option byte USER2.
 
 - The upstream stepper driver is open-loop microstepping from a sine table; it does not
   read the shunts. `adc.c` samples them continuously and only prints them.

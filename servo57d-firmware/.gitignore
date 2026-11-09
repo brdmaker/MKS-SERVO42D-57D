@@ -65,3 +65,4 @@ build/.ninja_deps
 # simulator
 sim/sim_test*
 sim/trace*.csv
+sim/sim_fw_test

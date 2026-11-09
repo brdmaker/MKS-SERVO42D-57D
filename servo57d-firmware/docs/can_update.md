@@ -16,8 +16,9 @@ failure or a bad file can brick the drive, and that part is tested.
 | 0x10000 | 56 KB | staging: the incoming image, same layout |
 | 0x1E000 | 8 KB | configuration: the saved parameter set (`params_save`) |
 
-The page size (2 KB) and the programming unit (4 bytes) are assumptions to check in the reference manual
-(`FW_PAGE`, `FW_PROG_UNIT`); so is an 8 KB bootloader. The application is about 15 to 25 KB today.
+The page size (2 KB) and the programming unit (a 32-bit word) are confirmed by the datasheet (`Doc/N32L406CBL7.pdf`,
+section 2.2.1), which also gives the timing: 100 us per word, 2 ms (20 ms at most) per page erase. The 8 KB bootloader
+is still an assumption. The application is about 15 to 25 KB today. SRAM is 24 KB, which the vector-table check uses.
 
 ## Image
 
@@ -77,9 +78,14 @@ word half programmed):
 - **Staying in the bootloader:** after reset the bootloader should wait about 0.5 s for an `info` frame
   before it starts the application, so that an application that hangs on start (the watchdog resets it) can
   still be replaced; and `boot_cb` needs a flag that survives the reset (a RAM word the startup code does not clear).
-- **Unknowns:** flash page size and programming unit, erase and program times, whether the 8 KB bootloader
-  fits, whether PD0 / BOOT0 (shared with the LED) interferes at reset, and the read protection level the first
-  SWD flash needs. The first bootloader still goes in over SWD after unlocking the chip with the Nations tool.
+- **Time:** with the datasheet's numbers a 30 KB update takes about 1 s for the staging writes and erases (a
+  256-byte chunk is 64 words, 6.4 ms) and at most about 1.3 s for the copy (15 pages: 20 ms erase and 51 ms
+  programming each). A flash erase stalls the CPU, which is why the application never does it.
+- **Recovery if the bootloader itself is broken:** the chip's ROM bootloader (system memory) programs flash over
+  USART1 or USB, not CAN. USART1 is PA9 / PA10 (`TX` / `RX` on the schematic, pads not traced); the USB D+/D-
+  pins are the CAN pins here.
+- **Unknowns:** whether the 8 KB bootloader fits, whether PD0 / BOOT0 (shared with the LED) interferes at
+  reset, and the read protection level the first SWD flash needs. The first bootloader still goes in over SWD after unlocking the chip with the Nations tool.
 - **The CRC of a running application** is only checked at boot, not while running.
 
 Size on the M4F (`-Os`): `fwup.c` is about 1.7 kB of code and 2 kB of RAM (the page buffer of the copy and

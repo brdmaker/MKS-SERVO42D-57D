@@ -31,8 +31,7 @@ measured; **verify** marks what needs a bench check.
 | keys | Menu on PA14 (SWCLK), Next on PA13 (SWDIO), Enter on PA15: shared with the SWD pins | Menu PB9, Enter PB8, Next PA15 |
 | other pins | OLED reset PA9, `M_IN` on PA10, no USART3 | OLED reset PB2, PB12..PB15 for `M_IN` / `M_OUT` |
 
-The N32L403's flash and RAM were not checked; the upstream SDK is for the N32L406 and the L403 is in
-the same N32L40x family, so it probably shares it (**verify**).
+The N32L403 is in the same datasheet as the N32L406 (`Doc/N32L406CBL7.pdf`, table 1-1): the K8 / KB parts have 64 / 128 KB of flash and 16 / 24 KB of SRAM, so the KB chip on this board has 128 KB and 24 KB, like the 57D's. The upstream SDK is for the N32L406; both are N32L40x, so it probably works for the L403 (**verify**).
 
 ## What follows for the firmware
 

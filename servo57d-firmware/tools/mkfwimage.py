@@ -11,7 +11,7 @@ payload size, payload CRC-32, header CRC-32) followed by the payload padded to 8
 import argparse, struct, sys, zlib
 
 HDR, MAGIC = 0x200, 0x46373553
-APP_OFF, APP_SIZE, FLASH, RAM_BASE, RAM_SIZE = 0x2000, 0xE000, 0x08000000, 0x20000000, 0x8000
+APP_OFF, APP_SIZE, FLASH, RAM_BASE, RAM_SIZE = 0x2000, 0xE000, 0x08000000, 0x20000000, 0x6000   # 24 KB SRAM
 
 
 def build(payload: bytes, board: int, version: int) -> bytes:

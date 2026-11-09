@@ -2,7 +2,7 @@
  * Plain C behind a flash interface, so the same code runs in the bootloader on the MCU and in
  * the simulator, which can cut the power at any flash operation (sim/sim_fwup.c).
  *
- * Flash (128 KB, offsets from 0x08000000; page and programming sizes: verify in the reference manual):
+ * Flash (128 KB, offsets from 0x08000000; 2 KB pages and 32-bit word programming, datasheet 2.2.1):
  *   0x00000  8 KB  bootloader        CAN driver, this code; never rewritten over CAN
  *   0x02000 56 KB  application       512 B image header, then the payload (vector table at +0x200)
  *   0x10000 56 KB  staging           the incoming image, same layout; the application is untouched
@@ -47,7 +47,7 @@
 #define FW_HDR_SIZE    0x200u
 #define FW_FLASH_ADDR  0x08000000u
 #define FW_RAM_BASE    0x20000000u
-#define FW_RAM_SIZE    0x8000u
+#define FW_RAM_SIZE    0x6000u            /* 24 KB SRAM (datasheet; the upstream linker script says 32 KB) */
 
 #define FW_ID_CMD   0x500u
 #define FW_ID_REPLY 0x600u
