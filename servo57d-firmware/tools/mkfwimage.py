@@ -11,7 +11,8 @@ payload size, payload CRC-32, header CRC-32) followed by the payload padded to 8
 import argparse, struct, sys, zlib
 
 HDR, MAGIC = 0x200, 0x46373553
-APP_OFF, APP_SIZE, FLASH, RAM_BASE, RAM_SIZE = 0x2000, 0xE000, 0x08000000, 0x20000000, 0x6000   # 24 KB SRAM
+APP_OFF, APP_SIZE, FLASH = 0x2000, 0xE000, 0x08000000
+SRAM = ((0x20000000, 0x20004000), (0x20006000, 0x20008000))     # SRAM1 16 KB, SRAM2 8 KB, a hole between
 
 
 def build(payload: bytes, board: int, version: int) -> bytes:
@@ -28,8 +29,8 @@ def build(payload: bytes, board: int, version: int) -> bytes:
 
 def plausible(payload: bytes) -> str:
     sp, rv = struct.unpack_from("<II", payload, 0)
-    if not RAM_BASE <= sp <= RAM_BASE + RAM_SIZE:
-        return f"initial stack pointer 0x{sp:08x} is not in RAM"
+    if not any(lo < sp <= hi for lo, hi in SRAM):
+        return f"initial stack pointer 0x{sp:08x} is not the top of SRAM1 or SRAM2"
     if not rv & 1 or not FLASH + APP_OFF + HDR <= rv < FLASH + APP_OFF + APP_SIZE:
         return f"reset vector 0x{rv:08x} is not in the application (link at 0x{FLASH + APP_OFF + HDR:08x})"
     return ""

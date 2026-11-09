@@ -69,7 +69,8 @@ int fw_region_check(const fw_flash_t *fl, uint32_t off, uint16_t board, fw_hdr_t
     /* a vector table: the stack pointer in RAM, the reset vector (Thumb) inside the application */
     if (fl->read(fl->ctx, off + FW_HDR_SIZE, buf, 8)) return FWS_FLASH;
     uint32_t sp = rd32(buf), rv = rd32(buf + 4);
-    if (sp < FW_RAM_BASE || sp > FW_RAM_BASE + FW_RAM_SIZE) return FWS_IMPLAUSIBLE;
+    bool sp_ok = (sp > FW_RAM1_BASE && sp <= FW_RAM1_END) || (sp > FW_RAM2_BASE && sp <= FW_RAM2_END);   /* top of a stack in SRAM1 or SRAM2 */
+    if (!sp_ok) return FWS_IMPLAUSIBLE;
     if (!(rv & 1) || rv < FW_FLASH_ADDR + FW_APP_OFF + FW_HDR_SIZE || rv >= FW_FLASH_ADDR + FW_APP_OFF + FW_APP_SIZE) return FWS_IMPLAUSIBLE;
     if (hout) *hout = h;
     return FWS_OK;

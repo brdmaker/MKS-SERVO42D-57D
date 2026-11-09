@@ -63,7 +63,7 @@ static uint8_t *make_payload(uint32_t n, uint32_t seed)
 {
     uint8_t *p = malloc(n); uint32_t x = seed * 2654435761u + 1;
     for (uint32_t i = 0; i < n; i++) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; p[i] = (uint8_t)x; }
-    uint32_t sp = FW_RAM_BASE + FW_RAM_SIZE, rv = FW_FLASH_ADDR + FW_APP_OFF + FW_HDR_SIZE + 0x41;
+    uint32_t sp = FW_RAM1_END, rv = FW_FLASH_ADDR + FW_APP_OFF + FW_HDR_SIZE + 0x41;
     memcpy(p, &sp, 4); memcpy(p + 4, &rv, 4);
     return p;
 }
@@ -158,6 +158,11 @@ static void test_crc_header(void)
     flash_blank(); put_app(img, len, FW_APP_OFF);
     CHECK(fw_region_check(&FL, FW_APP_OFF, BOARD, NULL) == FWS_IMPLAUSIBLE, "stack pointer outside RAM accepted");
     free(img);
+    /* the hole between SRAM1 and SRAM2, and the top of SRAM2 */
+    { uint32_t sps[3] = { 0x20005000u, FW_RAM2_END, FW_RAM2_BASE }; int want[3] = { FWS_IMPLAUSIBLE, 0, FWS_IMPLAUSIBLE };
+      for (int k = 0; k < 3; k++) { pl = make_payload(4096, 4); memcpy(pl, &sps[k], 4); img = malloc(FW_HDR_SIZE + 4096); fw_image_build(img, pl, 4096, BOARD, 1); free(pl);
+        flash_blank(); put_app(img, FW_HDR_SIZE + 4096, FW_APP_OFF);
+        CHECK(fw_region_check(&FL, FW_APP_OFF, BOARD, NULL) == want[k], "stack pointer 0x%08x: status %d", sps[k], fw_region_check(&FL, FW_APP_OFF, BOARD, NULL)); free(img); } }
     pl = make_payload(4096, 3); uint32_t rv = 0x08000001u; memcpy(pl + 4, &rv, 4);
     img = malloc(FW_HDR_SIZE + 4096); fw_image_build(img, pl, 4096, BOARD, 1); free(pl);
     flash_blank(); put_app(img, FW_HDR_SIZE + 4096, FW_APP_OFF);

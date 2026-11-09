@@ -17,8 +17,9 @@ failure or a bad file can brick the drive, and that part is tested.
 | 0x1E000 | 8 KB | configuration: the saved parameter set (`params_save`) |
 
 The page size (2 KB) and the programming unit (a 32-bit word) are confirmed by the datasheet (`Doc/N32L406CBL7.pdf`,
-section 2.2.1), which also gives the timing: 100 us per word, 2 ms (20 ms at most) per page erase. The 8 KB bootloader
-is still an assumption. The application is about 15 to 25 KB today. SRAM is 24 KB, which the vector-table check uses.
+section 2.2.1) and the user manual, which also give the timing: 100 us per word, 2 ms (20 ms at most) per page erase. The
+8 KB bootloader is still an assumption. The application is about 15 to 25 KB today. The vector-table check accepts a
+stack pointer at the top of SRAM1 (0x20004000) or SRAM2 (0x20008000); the two blocks have a hole between them.
 
 ## Image
 
@@ -78,12 +79,19 @@ word half programmed):
 - **Staying in the bootloader:** after reset the bootloader should wait about 0.5 s for an `info` frame
   before it starts the application, so that an application that hangs on start (the watchdog resets it) can
   still be replaced; and `boot_cb` needs a flag that survives the reset (a RAM word the startup code does not clear).
+- **What the flash driver needs** (user manual 2.2.1): unlock with the key pair `0x45670123`, `0xCDEF89AB` written to
+  `FLASH_KEY` (a wrong sequence locks the controller until reset); 32-bit programming only (a half-word write is a bus
+  error) and only into erased words; the internal HSI oscillator must be on while programming or erasing; check
+  `FLASH_STS.BUSY` before every operation; 4 `NOP`s after each programmed word; while an operation runs the CPU stalls
+  on any flash access (the bootloader's code must be able to wait, or run from SRAM); flash wait states: 0 up to 32 MHz,
+  1 from 32 to 64 MHz; all flash operations stop in the low-power modes.
 - **Time:** with the datasheet's numbers a 30 KB update takes about 1 s for the staging writes and erases (a
   256-byte chunk is 64 words, 6.4 ms) and at most about 1.3 s for the copy (15 pages: 20 ms erase and 51 ms
   programming each). A flash erase stalls the CPU, which is why the application never does it.
 - **Recovery if the bootloader itself is broken:** the chip's ROM bootloader (system memory) programs flash over
-  USART1 or USB, not CAN. USART1 is PA9 / PA10 (`TX` / `RX` on the schematic, pads not traced); the USB D+/D-
-  pins are the CAN pins here.
+  USART1 (also from the internal 16 MHz HSI) or USB full-speed DFU, not CAN. USART1 is PA9 / PA10 (`TX` / `RX` on the
+  schematic, pads not traced); the USB D+/D- pins are the CAN pins here. To enter it BOOT0 must be high at reset
+  (PD0, shared with the LED).
 - **Unknowns:** whether the 8 KB bootloader fits, whether PD0 / BOOT0 (shared with the LED) interferes at
   reset, and the read protection level the first SWD flash needs. The first bootloader still goes in over SWD after unlocking the chip with the Nations tool.
 - **The CRC of a running application** is only checked at boot, not while running.

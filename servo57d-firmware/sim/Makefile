@@ -42,7 +42,7 @@ check-fw: sim_fw_test
 
 # the Python image tool and the C builder must write the same bytes, and the tool must refuse bad input
 check-image: sim_fw_test
-	python3 -I -c "import struct,random; random.seed(5); b=bytearray(random.randbytes(10001)); struct.pack_into('<II',b,0,0x20006000,0x08002241); open('payload.tmp','wb').write(b)"
+	python3 -I -c "import struct,random; random.seed(5); b=bytearray(random.randbytes(10001)); struct.pack_into('<II',b,0,0x20004000,0x08002241); open('payload.tmp','wb').write(b)"
 	python3 -I ../tools/mkfwimage.py payload.tmp py.img --board 57 --version 3
 	./sim_fw_test --make-image payload.tmp c.img 57 3
 	cmp py.img c.img && echo "image tool: Python and C builders agree"

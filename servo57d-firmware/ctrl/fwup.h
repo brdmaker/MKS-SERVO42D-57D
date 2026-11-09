@@ -46,8 +46,11 @@
 #define FW_CFG_OFF     0x1E000u
 #define FW_HDR_SIZE    0x200u
 #define FW_FLASH_ADDR  0x08000000u
-#define FW_RAM_BASE    0x20000000u
-#define FW_RAM_SIZE    0x6000u            /* 24 KB SRAM (datasheet; the upstream linker script says 32 KB) */
+/* SRAM (user manual table 2-9): SRAM1 16 KB and SRAM2 8 KB (parity: initialise before use), with a hole between */
+#define FW_RAM1_BASE   0x20000000u
+#define FW_RAM1_END    0x20004000u
+#define FW_RAM2_BASE   0x20006000u
+#define FW_RAM2_END    0x20008000u
 
 #define FW_ID_CMD   0x500u
 #define FW_ID_REPLY 0x600u
