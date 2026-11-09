@@ -1,4 +1,0 @@
-#ifndef FW_VERSION_H_
-#define FW_VERSION_H_
-#define FW_VERSION "@FW_VERSION@"
-#endif  /* FW_VERSION_H_ */
